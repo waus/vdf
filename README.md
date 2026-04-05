@@ -4,7 +4,6 @@ Implementations of Wesolowski's verifiable delay function.
 
 ## Go RSA-group port
 
-The RSA-group implementation from [`RSA group/src`](./RSA%20group/src) is now available as a Go package in [`rsavdf`](./rsavdf).
 
 High-level API:
 
