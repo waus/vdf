@@ -52,10 +52,10 @@ type PublicParams struct {
 }
 
 // Proof is the compact public proof format for payload-based proving and verification.
-// Output is y = x^(2^difficulty) mod N, and Witness is the Wesolowski proof pi.
+// Y is y = x^(2^difficulty) mod N, and Pi is the Wesolowski proof pi.
 type Proof struct {
-	Output  []byte
-	Witness []byte
+	Y  []byte
+	Pi []byte
 }
 
 func New(lambda, k int) (*Wesolowski, error) {
@@ -267,8 +267,8 @@ func (w *Wesolowski) Prove(payload []byte, difficulty int) (*Proof, error) {
 	pi := new(big.Int).Exp(x, q, w.N)
 
 	return &Proof{
-		Output:  y.Bytes(),
-		Witness: pi.Bytes(),
+		Y:  y.Bytes(),
+		Pi: pi.Bytes(),
 	}, nil
 }
 
@@ -280,17 +280,17 @@ func (w *Wesolowski) Verify(payload []byte, difficulty int, proof *Proof) (bool,
 	if proof == nil {
 		return false, errors.New("proof must not be nil")
 	}
-	if len(proof.Output) == 0 {
-		return false, errors.New("proof output must not be empty")
+	if len(proof.Y) == 0 {
+		return false, errors.New("proof y must not be empty")
 	}
-	if len(proof.Witness) == 0 {
-		return false, errors.New("proof witness must not be empty")
+	if len(proof.Pi) == 0 {
+		return false, errors.New("proof pi must not be empty")
 	}
 
 	x := w.inputFromPayload(payload)
-	y := new(big.Int).SetBytes(proof.Output)
-	pi := new(big.Int).SetBytes(proof.Witness)
-	l := w.primeFromStatement(payload, difficulty, proof.Output)
+	y := new(big.Int).SetBytes(proof.Y)
+	pi := new(big.Int).SetBytes(proof.Pi)
+	l := w.primeFromStatement(payload, difficulty, proof.Y)
 
 	return w.NaiveVerify(x, y, difficulty, l, pi)
 }

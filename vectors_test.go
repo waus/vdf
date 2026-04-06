@@ -59,10 +59,10 @@ func TestPayloadVectors(t *testing.T) {
 				t.Fatalf("prove: %v", err)
 			}
 
-			if got := hex.EncodeToString(proof.Output); got != tc.outputHex {
+			if got := hex.EncodeToString(proof.Y); got != tc.outputHex {
 				t.Fatalf("unexpected output\nwant: %s\ngot:  %s", tc.outputHex, got)
 			}
-			if got := hex.EncodeToString(proof.Witness); got != tc.witnessHex {
+			if got := hex.EncodeToString(proof.Pi); got != tc.witnessHex {
 				t.Fatalf("unexpected witness\nwant: %s\ngot:  %s", tc.witnessHex, got)
 			}
 
