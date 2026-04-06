@@ -34,13 +34,12 @@ var nextPrimeBigPrimes = func() []*big.Int {
 
 // Wesolowski implements the RSA-group VDF flow used by the original C++ code.
 type Wesolowski struct {
-	N         *big.Int
-	P         *big.Int
-	Q         *big.Int
-	Lambda    int
-	K         int
-	challenge *big.Int
-	reader    io.Reader
+	N      *big.Int
+	P      *big.Int
+	Q      *big.Int
+	Lambda int
+	K      int
+	reader io.Reader
 }
 
 // PublicParams are the public VDF parameters needed for proof verification
@@ -106,13 +105,12 @@ func NewWithReader(lambda, k int, reader io.Reader) (*Wesolowski, error) {
 	n := new(big.Int).Mul(p, q)
 
 	return &Wesolowski{
-		N:         n,
-		P:         p,
-		Q:         q,
-		Lambda:    lambda,
-		K:         k,
-		challenge: new(big.Int),
-		reader:    reader,
+		N:      n,
+		P:      p,
+		Q:      q,
+		Lambda: lambda,
+		K:      k,
+		reader: reader,
 	}, nil
 }
 
@@ -134,11 +132,10 @@ func NewWithModulusAndReader(modulus *big.Int, k int, reader io.Reader) (*Wesolo
 	}
 
 	return &Wesolowski{
-		N:         new(big.Int).Set(modulus),
-		Lambda:    modulus.BitLen(),
-		K:         k,
-		challenge: new(big.Int),
-		reader:    reader,
+		N:      new(big.Int).Set(modulus),
+		Lambda: modulus.BitLen(),
+		K:      k,
+		reader: reader,
 	}, nil
 }
 
@@ -160,21 +157,6 @@ func (w *Wesolowski) GenerateAlpha(bitSize int) (*big.Int, error) {
 	}
 	limit := new(big.Int).Lsh(big.NewInt(1), uint(bitSize))
 	return rand.Int(w.reader, limit)
-}
-
-// HashPrime matches the current C++ behavior: it samples a random 2k-bit value once
-// and reuses the next prime derived from it for all inputs in the batch.
-func (w *Wesolowski) HashPrime(_ *big.Int) (*big.Int, error) {
-	if w.challenge.Sign() == 0 {
-		limit := new(big.Int).Lsh(big.NewInt(1), uint(2*w.K))
-		challenge, err := rand.Int(w.reader, limit)
-		if err != nil {
-			return nil, fmt.Errorf("sample challenge: %w", err)
-		}
-		w.challenge.Set(challenge)
-	}
-
-	return nextPrime(w.challenge), nil
 }
 
 func (w *Wesolowski) Evaluate(l, x *big.Int, squarings int) (pi, y *big.Int, err error) {

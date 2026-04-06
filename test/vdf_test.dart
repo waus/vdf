@@ -62,6 +62,7 @@ final List<_PayloadVector> _payloadVectors = <_PayloadVector>[
         'aa0cbb0fc4e4c68a289727fc9c1cf2d79059cb37785b220aa285602dbe21c7f1730fc3fdfc7928449d36405fb4e44b1c354940d40ad076fce190157c7765aefe14b539099f675e5bda024612e1c0a773297618cff7adc7409bad0ec47add9cd1',
   ),
 ];
+final BigInt _testChallengePrime = BigInt.from(65537);
 
 void main() {
   final tests = <_NamedTest>[
@@ -153,7 +154,7 @@ void _testPseudoprimes() {
 void _testEvaluateAndVerify() {
   final vdf = Wesolowski.create(128, 32);
   final x = vdf.generate();
-  final l = vdf.hashPrime(x);
+  final l = _testChallengePrime;
   final result = vdf.evaluate(l, x, 16);
   final ok = vdf.naiveVerify(x, result.y, 16, l, result.pi);
   _expect(ok, 'expected proof to verify');
@@ -167,7 +168,7 @@ void _testAggregateAndVerify() {
   final pis = <BigInt>[];
   final alphas = <BigInt>[];
 
-  final l = vdf.hashPrime(null);
+  final l = _testChallengePrime;
 
   for (var i = 0; i < 4; i++) {
     final x = vdf.generate();
@@ -188,7 +189,7 @@ void _testAggregateAndVerify() {
 void _testVerifyRejectsWrongOutput() {
   final vdf = Wesolowski.create(128, 32);
   final x = vdf.generate();
-  final l = vdf.hashPrime(x);
+  final l = _testChallengePrime;
   final result = vdf.evaluate(l, x, 12);
 
   final wrongY = result.y + one;

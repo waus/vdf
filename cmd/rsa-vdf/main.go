@@ -56,10 +56,7 @@ func main() {
 		alphas = append(alphas, alpha)
 	}
 
-	l, err := vdf.HashPrime(xs[0])
-	if err != nil {
-		exitf("hash prime: %v", err)
-	}
+	l := big.NewInt(65537)
 	fmt.Printf("Time cost for setup: %v\n", time.Since(start).Seconds())
 
 	start = time.Now()

@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+var testChallengePrime = big.NewInt(65537)
+
 func TestNextPrimeSmallValues(t *testing.T) {
 	tests := []struct {
 		in   int64
@@ -64,10 +66,7 @@ func TestEvaluateAndVerify(t *testing.T) {
 		t.Fatalf("generate x: %v", err)
 	}
 
-	l, err := vdf.HashPrime(x)
-	if err != nil {
-		t.Fatalf("hash prime: %v", err)
-	}
+	l := testChallengePrime
 
 	pi, y, err := vdf.Evaluate(l, x, 16)
 	if err != nil {
@@ -96,10 +95,7 @@ func TestAggregateAndVerify(t *testing.T) {
 		alphas []*big.Int
 	)
 
-	l, err := vdf.HashPrime(nil)
-	if err != nil {
-		t.Fatalf("hash prime: %v", err)
-	}
+	l := testChallengePrime
 
 	for range 4 {
 		x, err := vdf.Generate()
@@ -146,10 +142,7 @@ func TestVerifyRejectsWrongOutput(t *testing.T) {
 		t.Fatalf("generate x: %v", err)
 	}
 
-	l, err := vdf.HashPrime(x)
-	if err != nil {
-		t.Fatalf("hash prime: %v", err)
-	}
+	l := testChallengePrime
 
 	pi, y, err := vdf.Evaluate(l, x, 12)
 	if err != nil {

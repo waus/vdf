@@ -1,3 +1,4 @@
 .idea/
+.gocache/
 .dart_tool/
 pubspec.lock

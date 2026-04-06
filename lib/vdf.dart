@@ -199,8 +199,8 @@ class PublicParams {
 
 class Proof {
   Proof({required Uint8List y, required Uint8List pi})
-    : y = Uint8List.fromList(y),
-      pi = Uint8List.fromList(pi);
+      : y = Uint8List.fromList(y),
+        pi = Uint8List.fromList(pi);
 
   final Uint8List y;
   final Uint8List pi;
@@ -304,7 +304,6 @@ class Wesolowski {
   final int k;
 
   final Random _random;
-  BigInt _challenge = BigInt.zero;
 
   PublicParams publicParams() {
     return PublicParams(modulus: _bigIntToBytes(n), lambda: n.bitLength, k: k);
@@ -320,14 +319,6 @@ class Wesolowski {
     }
     final limit = one << bitSize;
     return _randomBelow(limit, _random);
-  }
-
-  BigInt hashPrime(BigInt? _) {
-    if (_challenge == BigInt.zero) {
-      final limit = one << (2 * k);
-      _challenge = _randomBelow(limit, _random);
-    }
-    return nextPrime(_challenge);
   }
 
   EvaluationResult evaluate(BigInt l, BigInt x, int squarings) {

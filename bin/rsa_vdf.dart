@@ -54,7 +54,7 @@ void main(List<String> args) {
     alphas.add(vdf.generateAlpha(k));
   }
 
-  final l = vdf.hashPrime(xs.first);
+  final l = BigInt.from(65537);
   setup.stop();
   stdout.writeln('Time cost for setup: ${setup.elapsedMilliseconds / 1000.0}');
 
