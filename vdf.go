@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"math/bits"
+	"time"
 )
 
 var one = big.NewInt(1)
@@ -55,6 +57,31 @@ type PublicParams struct {
 type Proof struct {
 	Y  []byte
 	Pi []byte
+}
+
+const (
+	modExpWindowBits           = 4
+	progressTickInterval       = 50 * time.Millisecond
+	progressPhaseHeadroom      = 0.98
+	defaultProgressNsPerWindow = int64(1_500)
+)
+
+// ProverStatus reports the state of an asynchronous proof generation.
+type ProverStatus struct {
+	Result <-chan Proof
+	Err    <-chan error
+
+	Progress float32
+}
+
+func (s *ProverStatus) setProgress(v float32) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+	s.Progress = v
 }
 
 func New(lambda, k int) (*Wesolowski, error) {
@@ -254,6 +281,67 @@ func (w *Wesolowski) Prove(payload []byte, difficulty int) (*Proof, error) {
 	}, nil
 }
 
+// ProveAsync starts proving in a separate goroutine and reports progress in [0, 1].
+// The progress estimator is based on the two dominant modular exponentiation phases.
+func (w *Wesolowski) ProveAsync(payload []byte, difficulty int) *ProverStatus {
+	resultCh := make(chan Proof, 1)
+	errCh := make(chan error, 1)
+	status := &ProverStatus{
+		Result: resultCh,
+		Err:    errCh,
+	}
+	status.setProgress(0)
+
+	go func() {
+		defer close(resultCh)
+		defer close(errCh)
+
+		if difficulty < 0 {
+			errCh <- fmt.Errorf("difficulty must be non-negative, got %d", difficulty)
+			status.setProgress(1)
+			return
+		}
+
+		x := w.inputFromPayload(payload)
+		exp := twoPow(difficulty)
+
+		firstWindows := estimateExpWindows(exp)
+		firstWeight := float32(0.5)
+		stageOneDone := make(chan struct{})
+		stageOneStart := time.Now()
+		go runProgressAnimator(status, 0, firstWeight, firstWindows, defaultProgressNsPerWindow, stageOneDone)
+
+		y := new(big.Int).Exp(x, exp, w.N)
+		close(stageOneDone)
+
+		l := w.primeFromStatement(payload, difficulty, y.Bytes())
+		q := new(big.Int).Quo(exp, l)
+		secondWindows := estimateExpWindows(q)
+
+		totalWindows := firstWindows + secondWindows
+		if totalWindows > 0 {
+			firstWeight = float32(firstWindows) / float32(totalWindows)
+		}
+		status.setProgress(firstWeight)
+
+		nsPerWindow := estimateNsPerWindow(time.Since(stageOneStart), firstWindows)
+		secondWeight := float32(1) - firstWeight
+		stageTwoDone := make(chan struct{})
+		go runProgressAnimator(status, firstWeight, secondWeight, secondWindows, nsPerWindow, stageTwoDone)
+
+		pi := new(big.Int).Exp(x, q, w.N)
+		close(stageTwoDone)
+
+		status.setProgress(1)
+		resultCh <- Proof{
+			Y:  y.Bytes(),
+			Pi: pi.Bytes(),
+		}
+	}()
+
+	return status
+}
+
 // Verify checks a proof for the given payload and difficulty.
 func (w *Wesolowski) Verify(payload []byte, difficulty int, proof *Proof) (bool, error) {
 	if difficulty < 0 {
@@ -390,4 +478,70 @@ func verifyExponent(squarings int, l *big.Int) *big.Int {
 		tauMod.Mod(tauMod, phiL)
 	}
 	return new(big.Int).Exp(two, tauMod, l)
+}
+
+func estimateExpWindows(exp *big.Int) int {
+	if exp == nil || exp.Sign() <= 0 {
+		return 1
+	}
+
+	bitLen := exp.BitLen()
+	if bitLen <= bits.UintSize {
+		return 1
+	}
+
+	words := (bitLen + bits.UintSize - 1) / bits.UintSize
+	windowsPerWord := bits.UintSize / modExpWindowBits
+	if windowsPerWord < 1 {
+		windowsPerWord = 1
+	}
+	return words * windowsPerWord
+}
+
+func estimateNsPerWindow(duration time.Duration, windows int) int64 {
+	if duration <= 0 || windows <= 0 {
+		return defaultProgressNsPerWindow
+	}
+	ns := duration.Nanoseconds() / int64(windows)
+	if ns <= 0 {
+		return defaultProgressNsPerWindow
+	}
+	return ns
+}
+
+func runProgressAnimator(status *ProverStatus, base, weight float32, windows int, nsPerWindow int64, done <-chan struct{}) {
+	if weight <= 0 {
+		return
+	}
+	if windows <= 0 {
+		windows = 1
+	}
+	if nsPerWindow <= 0 {
+		nsPerWindow = defaultProgressNsPerWindow
+	}
+
+	estimate := time.Duration(int64(windows) * nsPerWindow)
+	if estimate < progressTickInterval {
+		estimate = progressTickInterval
+	}
+
+	ticker := time.NewTicker(progressTickInterval)
+	defer ticker.Stop()
+	start := time.Now()
+
+	for {
+		select {
+		case <-done:
+			return
+		case now := <-ticker.C:
+			frac := float32(now.Sub(start)) / float32(estimate)
+			if frac < 0 {
+				frac = 0
+			}
+			if frac > progressPhaseHeadroom {
+				frac = progressPhaseHeadroom
+			}
+			status.setProgress(base + weight*frac)
+		}
+	}
 }

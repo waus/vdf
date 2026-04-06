@@ -13,6 +13,20 @@ proof, _ := vdf.Prove([]byte("payload"), 20)
 ok, _ := vdf.Verify([]byte("payload"), 20, proof)
 ```
 
+Async proving with progress:
+
+```go
+status := vdf.ProveAsync([]byte("payload"), 20)
+for status.Progress < 1 {
+	time.Sleep(50 * time.Millisecond)
+}
+if err, ok := <-status.Err; ok && err != nil {
+	panic(err)
+}
+proof := <-status.Result
+ok, _ := vdf.Verify([]byte("payload"), 20, &proof)
+```
+
 Export and reuse public parameters in another process:
 
 ```go

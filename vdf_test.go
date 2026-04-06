@@ -2,7 +2,9 @@ package vdf
 
 import (
 	"math/big"
+	"strings"
 	"testing"
+	"time"
 )
 
 var testChallengePrime = big.NewInt(65537)
@@ -242,5 +244,83 @@ func TestPublicParamsAllowCrossInstanceVerification(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("expected verification to succeed with shared public params")
+	}
+}
+
+func TestProveAsyncProducesVerifiableProof(t *testing.T) {
+	vdf, err := New(128, 32)
+	if err != nil {
+		t.Fatalf("new vdf: %v", err)
+	}
+
+	payload := []byte("async payload")
+	status := vdf.ProveAsync(payload, 10)
+
+	var proof Proof
+	select {
+	case got, ok := <-status.Result:
+		if !ok {
+			t.Fatal("result channel closed without proof")
+		}
+		proof = got
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for async prove")
+	}
+
+	ok, err := vdf.Verify(payload, 10, &proof)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected async proof to verify")
+	}
+
+	select {
+	case err, ok := <-status.Err:
+		if ok && err != nil {
+			t.Fatalf("unexpected async error: %v", err)
+		}
+	default:
+	}
+
+	if progress := status.Progress; progress != 1 {
+		t.Fatalf("expected progress to be 1, got %f", progress)
+	}
+}
+
+func TestProveAsyncReturnsErrorForNegativeDifficulty(t *testing.T) {
+	vdf, err := New(128, 32)
+	if err != nil {
+		t.Fatalf("new vdf: %v", err)
+	}
+
+	status := vdf.ProveAsync([]byte("payload"), -1)
+
+	select {
+	case err, ok := <-status.Err:
+		if !ok {
+			t.Fatal("error channel closed without error")
+		}
+		if err == nil {
+			t.Fatal("expected non-nil error")
+		}
+		if !strings.Contains(err.Error(), "difficulty must be non-negative") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for async error")
+	}
+
+	select {
+	case _, ok := <-status.Result:
+		if ok {
+			t.Fatal("unexpected proof on error path")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("result channel did not close after async error")
+	}
+
+	if progress := status.Progress; progress != 1 {
+		t.Fatalf("expected progress to be 1, got %f", progress)
 	}
 }
