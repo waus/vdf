@@ -41,3 +41,31 @@ Optional flags:
 ```bash
 go run ./cmd/rsa-vdf --lambda 1024 --k 128 15 10
 ```
+
+## Dart RSA-group port
+
+High-level API:
+
+```dart
+final vdf = Wesolowski.create(1024, 128);
+final proof = vdf.prove(Uint8List.fromList('payload'.codeUnits), 20);
+final ok = vdf.verify(Uint8List.fromList('payload'.codeUnits), 20, proof);
+```
+
+Run tests:
+
+```bash
+/Users/user/sdk/flutter/bin/dart run test/vdf_test.dart
+```
+
+Run benchmarks:
+
+```bash
+/Users/user/sdk/flutter/bin/dart run benchmark/bench.dart
+```
+
+Run the demo CLI:
+
+```bash
+/Users/user/sdk/flutter/bin/dart run bin/rsa_vdf.dart 15 10
+```
