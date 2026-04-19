@@ -1,9 +1,19 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'src/native/openssl_vdf_backend.dart';
+
+export 'src/native/openssl_vdf_backend.dart'
+    show NativeModulusContext, VdfNativeBackend;
+
 final BigInt one = BigInt.one;
 final BigInt two = BigInt.from(2);
+
+const double _progressPhaseHeadroom = 0.98;
+const int _defaultProgressNsPerUnit = 1500;
 
 const List<int> _nextPrimeSmallTable = <int>[
   2,
@@ -206,6 +216,16 @@ class Proof {
   final Uint8List pi;
 }
 
+final class ProveProgress {
+  const ProveProgress({
+    required this.completion,
+    required this.elapsed,
+  });
+
+  final double completion;
+  final Duration elapsed;
+}
+
 class EvaluationResult {
   EvaluationResult({required this.pi, required this.y});
 
@@ -304,6 +324,10 @@ class Wesolowski {
   final int k;
 
   final Random _random;
+  late final NativeModulusContext? _nativeModulus =
+      VdfNativeBackend.instance?.createModulusContext(_bigIntToBytes(n));
+
+  bool get hasNativeBackend => _nativeModulus != null;
 
   PublicParams publicParams() {
     return PublicParams(modulus: _bigIntToBytes(n), lambda: n.bitLength, k: k);
@@ -393,6 +417,12 @@ class Wesolowski {
       throw ArgumentError('difficulty must be non-negative, got $difficulty');
     }
 
+    final nativeModulus = _nativeModulus;
+    if (nativeModulus != null) {
+      final nativeProof = nativeModulus.prove(payload, difficulty, k);
+      return Proof(y: nativeProof.y, pi: nativeProof.pi);
+    }
+
     final x = _inputFromPayload(payload);
     final exp = twoPow(difficulty);
     final y = x.modPow(exp, n);
@@ -403,6 +433,155 @@ class Wesolowski {
     final pi = x.modPow(q, n);
 
     return Proof(y: yBytes, pi: _bigIntToBytes(pi));
+  }
+
+  Proof proveWithNativeBackend(Uint8List payload, int difficulty) {
+    if (difficulty < 0) {
+      throw ArgumentError('difficulty must be non-negative, got $difficulty');
+    }
+
+    if (_nativeModulus == null) {
+      throw StateError('native backend is not available');
+    }
+    return prove(payload, difficulty);
+  }
+
+  Future<Proof> proveAsync(
+    Uint8List payload,
+    int difficulty, {
+    Duration progressInterval = const Duration(milliseconds: 50),
+    void Function(ProveProgress progress)? onProgress,
+  }) async {
+    final elapsed = Stopwatch()..start();
+    _emitProveProgress(onProgress, 0, elapsed.elapsed);
+
+    if (difficulty < 0) {
+      throw ArgumentError('difficulty must be non-negative, got $difficulty');
+    }
+    if (progressInterval <= Duration.zero) {
+      throw ArgumentError('progressInterval must be positive');
+    }
+
+    final firstWork = _estimatePow2ExpWorkForDifficulty(difficulty);
+    final messages = ReceivePort();
+    Isolate? isolate;
+    Timer? progressTimer;
+    var currentBase = 0.0;
+    var currentWeight = 0.5;
+    var currentWork = firstWork;
+    var currentNsPerUnit = _defaultProgressNsPerUnit;
+    final phaseElapsed = Stopwatch();
+    var completed = false;
+
+    void stopProgressTimer() {
+      progressTimer?.cancel();
+      progressTimer = null;
+      phaseElapsed.stop();
+    }
+
+    void startProgressTimer({
+      required double base,
+      required double weight,
+      required int work,
+      required int nsPerUnit,
+    }) {
+      stopProgressTimer();
+      if (weight <= 0) {
+        return;
+      }
+
+      currentBase = base;
+      currentWeight = weight;
+      currentWork = work <= 0 ? 1 : work;
+      currentNsPerUnit = nsPerUnit <= 0 ? _defaultProgressNsPerUnit : nsPerUnit;
+      phaseElapsed
+        ..reset()
+        ..start();
+
+      progressTimer = Timer.periodic(progressInterval, (_) {
+        final estimate = _progressPhaseEstimate(
+          currentWork,
+          currentNsPerUnit,
+          progressInterval,
+        );
+        var frac = phaseElapsed.elapsedMicroseconds / estimate.inMicroseconds;
+        if (frac < 0) {
+          frac = 0;
+        }
+        if (frac > _progressPhaseHeadroom) {
+          frac = _progressPhaseHeadroom;
+        }
+        _emitProveProgress(
+          onProgress,
+          currentBase + currentWeight * frac,
+          elapsed.elapsed,
+        );
+      });
+    }
+
+    startProgressTimer(
+      base: 0,
+      weight: currentWeight,
+      work: firstWork,
+      nsPerUnit: _defaultProgressNsPerUnit,
+    );
+
+    try {
+      isolate = await Isolate.spawn<_ProveIsolateRequest>(
+        _proveIsolate,
+        _ProveIsolateRequest(
+          sendPort: messages.sendPort,
+          modulus: n,
+          k: k,
+          payload: Uint8List.fromList(payload),
+          difficulty: difficulty,
+        ),
+        errorsAreFatal: true,
+        onError: messages.sendPort,
+        onExit: messages.sendPort,
+      );
+
+      await for (final message in messages) {
+        if (message is _ProvePhaseComplete) {
+          stopProgressTimer();
+
+          final totalWork = message.firstWork + message.secondWork;
+          final firstWeight =
+              totalWork > 0 ? message.firstWork / totalWork : 0.5;
+          _emitProveProgress(onProgress, firstWeight, elapsed.elapsed);
+
+          final nsPerUnit = _estimateNsPerUnit(
+            message.elapsed,
+            message.firstWork,
+          );
+          startProgressTimer(
+            base: firstWeight,
+            weight: 1 - firstWeight,
+            work: message.secondWork,
+            nsPerUnit: nsPerUnit,
+          );
+        } else if (message is _ProveIsolateResult) {
+          stopProgressTimer();
+          completed = true;
+          _emitProveProgress(onProgress, 1, elapsed.elapsed);
+          return Proof(y: message.y, pi: message.pi);
+        } else if (message is _ProveIsolateError) {
+          throw StateError(message.message);
+        } else if (message == null) {
+          throw StateError('prove isolate exited without returning a proof');
+        } else if (message is List && message.length >= 2) {
+          throw StateError('${message[0]}\n${message[1]}');
+        }
+      }
+
+      throw StateError('prove isolate exited without returning a proof');
+    } finally {
+      stopProgressTimer();
+      messages.close();
+      if (!completed) {
+        isolate?.kill(priority: Isolate.immediate);
+      }
+    }
   }
 
   bool verify(Uint8List payload, int difficulty, Proof proof) {
@@ -484,6 +663,192 @@ class Wesolowski {
 
 BigInt twoPow(int power) {
   return one << power;
+}
+
+void _proveIsolate(_ProveIsolateRequest request) {
+  try {
+    final vdf = Wesolowski._(
+      n: request.modulus,
+      lambda: request.modulus.bitLength,
+      k: request.k,
+      random: Random(0),
+    );
+    final firstWork = _estimatePow2ExpWorkForDifficulty(request.difficulty);
+    final nativeModulus = vdf._nativeModulus;
+    if (nativeModulus != null) {
+      NativeProveSession? nativeSession;
+      try {
+        final stageOne = Stopwatch()..start();
+        final stage = nativeModulus.proveStage1(
+          request.payload,
+          request.difficulty,
+          request.k,
+        );
+        stageOne.stop();
+        nativeSession = stage.session;
+
+        request.sendPort.send(
+          _ProvePhaseComplete(
+            firstWork: firstWork,
+            secondWork: stage.secondWork,
+            elapsed: stageOne.elapsed,
+          ),
+        );
+
+        final piBytes = nativeSession.finish();
+        request.sendPort.send(_ProveIsolateResult(y: stage.y, pi: piBytes));
+      } finally {
+        nativeSession?.close();
+      }
+      return;
+    }
+
+    final x = vdf._inputFromPayload(request.payload);
+    final exp = twoPow(request.difficulty);
+
+    final stageOne = Stopwatch()..start();
+    final y = x.modPow(exp, vdf.n);
+    stageOne.stop();
+    final yBytes = _bigIntToBytes(y);
+
+    final l = vdf._primeFromStatement(
+      request.payload,
+      request.difficulty,
+      yBytes,
+    );
+    final q = exp ~/ l;
+    final secondWork = _estimateExpWork(q);
+
+    request.sendPort.send(
+      _ProvePhaseComplete(
+        firstWork: firstWork,
+        secondWork: secondWork,
+        elapsed: stageOne.elapsed,
+      ),
+    );
+
+    final pi = x.modPow(q, vdf.n);
+    request.sendPort.send(
+      _ProveIsolateResult(y: yBytes, pi: _bigIntToBytes(pi)),
+    );
+  } catch (e, st) {
+    request.sendPort.send(_ProveIsolateError('$e\n$st'));
+  }
+}
+
+void _emitProveProgress(
+  void Function(ProveProgress progress)? onProgress,
+  double completion,
+  Duration elapsed,
+) {
+  if (onProgress == null) {
+    return;
+  }
+  onProgress(
+      ProveProgress(completion: _clampProgress(completion), elapsed: elapsed));
+}
+
+double _clampProgress(double value) {
+  if (value.isNaN || value < 0) {
+    return 0;
+  }
+  if (value > 1) {
+    return 1;
+  }
+  return value;
+}
+
+int _estimateExpWork(BigInt? exp) {
+  if (exp == null || exp <= BigInt.zero) {
+    return 1;
+  }
+
+  final bitLen = exp.bitLength;
+  if (bitLen <= 1) {
+    return 1;
+  }
+
+  if ((exp & (exp - one)) == BigInt.zero) {
+    return bitLen - 1;
+  }
+
+  final squarings = bitLen - 1;
+  final expectedMultiplies = (bitLen + 1) >> 1;
+  return squarings + expectedMultiplies;
+}
+
+int _estimatePow2ExpWorkForDifficulty(int difficulty) {
+  if (difficulty <= 0) {
+    return 1;
+  }
+  return difficulty;
+}
+
+int _estimateNsPerUnit(Duration duration, int work) {
+  if (duration <= Duration.zero || work <= 0) {
+    return _defaultProgressNsPerUnit;
+  }
+
+  final ns = duration.inMicroseconds * 1000 ~/ work;
+  if (ns <= 0) {
+    return _defaultProgressNsPerUnit;
+  }
+  return ns;
+}
+
+Duration _progressPhaseEstimate(
+  int work,
+  int nsPerUnit,
+  Duration progressInterval,
+) {
+  final safeWork = work <= 0 ? 1 : work;
+  final safeNs = nsPerUnit <= 0 ? _defaultProgressNsPerUnit : nsPerUnit;
+  var estimate = Duration(microseconds: (safeWork * safeNs) ~/ 1000);
+  if (estimate < progressInterval) {
+    estimate = progressInterval;
+  }
+  return estimate;
+}
+
+class _ProveIsolateRequest {
+  _ProveIsolateRequest({
+    required this.sendPort,
+    required this.modulus,
+    required this.k,
+    required this.payload,
+    required this.difficulty,
+  });
+
+  final SendPort sendPort;
+  final BigInt modulus;
+  final int k;
+  final Uint8List payload;
+  final int difficulty;
+}
+
+class _ProvePhaseComplete {
+  _ProvePhaseComplete({
+    required this.firstWork,
+    required this.secondWork,
+    required this.elapsed,
+  });
+
+  final int firstWork;
+  final int secondWork;
+  final Duration elapsed;
+}
+
+class _ProveIsolateResult {
+  _ProveIsolateResult({required this.y, required this.pi});
+
+  final Uint8List y;
+  final Uint8List pi;
+}
+
+class _ProveIsolateError {
+  _ProveIsolateError(this.message);
+
+  final String message;
 }
 
 BigInt nextPrime(BigInt? n) {

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import '../lib/vdf.dart';
@@ -8,7 +10,7 @@ class _NamedTest {
   const _NamedTest(this.name, this.body);
 
   final String name;
-  final void Function() body;
+  final FutureOr<void> Function() body;
 }
 
 class _PayloadVector {
@@ -64,7 +66,7 @@ final List<_PayloadVector> _payloadVectors = <_PayloadVector>[
 ];
 final BigInt _testChallengePrime = BigInt.from(65537);
 
-void main() {
+Future<void> main() async {
   final tests = <_NamedTest>[
     _NamedTest('nextPrime small values', _testNextPrimeSmallValues),
     _NamedTest('nextPrime rejects known pseudoprimes', _testPseudoprimes),
@@ -75,6 +77,19 @@ void main() {
     _NamedTest('payload mismatch fails', _testPayloadMismatch),
     _NamedTest('difficulty mismatch fails', _testDifficultyMismatch),
     _NamedTest('public params cross-instance verification', _testPublicParams),
+    _NamedTest(
+      'native backend auto-loads from bundled asset or env',
+      _testNativeBackendAutoLoads,
+    ),
+    _NamedTest(
+      'native backend auto-loads in isolate',
+      _testNativeBackendAutoLoadsInIsolate,
+    ),
+    _NamedTest(
+      'native prove matches pure dart',
+      _testNativeProveMatchesPureDart,
+    ),
+    _NamedTest('payload async prove and progress', _testPayloadApiProveAsync),
     _NamedTest('payload vectors compatibility', _testPayloadVectors),
   ];
 
@@ -84,7 +99,7 @@ void main() {
   for (final test in tests) {
     final sw = Stopwatch()..start();
     try {
-      test.body();
+      await test.body();
       sw.stop();
       stdout.writeln('PASS ${test.name} (${sw.elapsedMilliseconds} ms)');
     } catch (e, st) {
@@ -225,6 +240,95 @@ void _testPublicParams() {
   final verifier = Wesolowski.withPublicParams(prover.publicParams());
   final ok = verifier.verify(_bytes('payload'), 11, proof);
   _expect(ok, 'expected verification to succeed with shared public params');
+}
+
+void _testNativeBackendAutoLoads() {
+  final nativeLib = Platform.environment['VDFRSA_NATIVE_LIB'];
+  final vdf = Wesolowski.create(128, 32);
+
+  stdout.writeln('native backend: ${vdf.hasNativeBackend}');
+
+  if ((nativeLib == null || nativeLib.isEmpty) && !vdf.hasNativeBackend) {
+    return;
+  }
+
+  _expect(
+    vdf.hasNativeBackend,
+    'expected native backend to auto-load from VDFRSA_NATIVE_LIB',
+  );
+}
+
+Future<void> _testNativeBackendAutoLoadsInIsolate() async {
+  final nativeLib = Platform.environment['VDFRSA_NATIVE_LIB'];
+
+  final hasNative = await Isolate.run<bool>(() {
+    final vdf = Wesolowski.create(128, 32);
+    return vdf.hasNativeBackend;
+  });
+
+  if ((nativeLib == null || nativeLib.isEmpty) && !hasNative) {
+    return;
+  }
+
+  _expect(
+    hasNative,
+    'expected native backend to auto-load inside spawned isolate',
+  );
+}
+
+void _testNativeProveMatchesPureDart() {
+  final vdf = Wesolowski.create(128, 32);
+  if (!vdf.hasNativeBackend) {
+    return;
+  }
+
+  final payload = _bytes('native payload');
+  final pure = vdf.prove(payload, 14);
+  final native = vdf.proveWithNativeBackend(payload, 14);
+
+  _expect(_hexEncode(native.y) == _hexEncode(pure.y), 'native y differs');
+  _expect(_hexEncode(native.pi) == _hexEncode(pure.pi), 'native pi differs');
+  _expect(vdf.verify(payload, 14, native), 'native proof failed verify');
+}
+
+Future<void> _testPayloadApiProveAsync() async {
+  final vdf = Wesolowski.create(128, 32);
+  final payload = _bytes('hello async payload');
+  final syncProof = vdf.prove(payload, 14);
+  final progress = <ProveProgress>[];
+
+  final asyncProof = await vdf.proveAsync(
+    payload,
+    14,
+    progressInterval: const Duration(milliseconds: 1),
+    onProgress: progress.add,
+  );
+
+  _expect(
+    _hexEncode(asyncProof.y) == _hexEncode(syncProof.y),
+    'async y differs',
+  );
+  _expect(
+    _hexEncode(asyncProof.pi) == _hexEncode(syncProof.pi),
+    'async pi differs',
+  );
+  _expect(vdf.verify(payload, 14, asyncProof), 'async proof failed verify');
+  _expect(progress.isNotEmpty, 'expected progress callbacks');
+  _expect(progress.first.completion == 0, 'first progress must be 0');
+  _expect(progress.last.completion == 1, 'last progress must be 1');
+
+  var previous = 0.0;
+  for (final item in progress) {
+    _expect(
+      item.completion >= 0 && item.completion <= 1,
+      'progress out of range: ${item.completion}',
+    );
+    _expect(
+      item.completion >= previous,
+      'progress moved backwards: $previous -> ${item.completion}',
+    );
+    previous = item.completion;
+  }
 }
 
 void _testPayloadVectors() {
