@@ -66,6 +66,18 @@ final proof = vdf.prove(Uint8List.fromList('payload'.codeUnits), 20);
 final ok = vdf.verify(Uint8List.fromList('payload'.codeUnits), 20, proof);
 ```
 
+Async proving with progress:
+
+```dart
+final proof = await vdf.proveAsync(
+  Uint8List.fromList('payload'.codeUnits),
+  20,
+  onProgress: (progress) {
+    print('${(progress.completion * 100).toStringAsFixed(1)}%');
+  },
+);
+```
+
 Run tests:
 
 ```bash

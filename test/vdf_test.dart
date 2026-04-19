@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -8,7 +9,7 @@ class _NamedTest {
   const _NamedTest(this.name, this.body);
 
   final String name;
-  final void Function() body;
+  final FutureOr<void> Function() body;
 }
 
 class _PayloadVector {
@@ -64,7 +65,7 @@ final List<_PayloadVector> _payloadVectors = <_PayloadVector>[
 ];
 final BigInt _testChallengePrime = BigInt.from(65537);
 
-void main() {
+Future<void> main() async {
   final tests = <_NamedTest>[
     _NamedTest('nextPrime small values', _testNextPrimeSmallValues),
     _NamedTest('nextPrime rejects known pseudoprimes', _testPseudoprimes),
@@ -75,6 +76,7 @@ void main() {
     _NamedTest('payload mismatch fails', _testPayloadMismatch),
     _NamedTest('difficulty mismatch fails', _testDifficultyMismatch),
     _NamedTest('public params cross-instance verification', _testPublicParams),
+    _NamedTest('payload async prove and progress', _testPayloadApiProveAsync),
     _NamedTest('payload vectors compatibility', _testPayloadVectors),
   ];
 
@@ -84,7 +86,7 @@ void main() {
   for (final test in tests) {
     final sw = Stopwatch()..start();
     try {
-      test.body();
+      await test.body();
       sw.stop();
       stdout.writeln('PASS ${test.name} (${sw.elapsedMilliseconds} ms)');
     } catch (e, st) {
@@ -225,6 +227,46 @@ void _testPublicParams() {
   final verifier = Wesolowski.withPublicParams(prover.publicParams());
   final ok = verifier.verify(_bytes('payload'), 11, proof);
   _expect(ok, 'expected verification to succeed with shared public params');
+}
+
+Future<void> _testPayloadApiProveAsync() async {
+  final vdf = Wesolowski.create(128, 32);
+  final payload = _bytes('hello async payload');
+  final syncProof = vdf.prove(payload, 14);
+  final progress = <ProveProgress>[];
+
+  final asyncProof = await vdf.proveAsync(
+    payload,
+    14,
+    progressInterval: const Duration(milliseconds: 1),
+    onProgress: progress.add,
+  );
+
+  _expect(
+    _hexEncode(asyncProof.y) == _hexEncode(syncProof.y),
+    'async y differs',
+  );
+  _expect(
+    _hexEncode(asyncProof.pi) == _hexEncode(syncProof.pi),
+    'async pi differs',
+  );
+  _expect(vdf.verify(payload, 14, asyncProof), 'async proof failed verify');
+  _expect(progress.isNotEmpty, 'expected progress callbacks');
+  _expect(progress.first.completion == 0, 'first progress must be 0');
+  _expect(progress.last.completion == 1, 'last progress must be 1');
+
+  var previous = 0.0;
+  for (final item in progress) {
+    _expect(
+      item.completion >= 0 && item.completion <= 1,
+      'progress out of range: ${item.completion}',
+    );
+    _expect(
+      item.completion >= previous,
+      'progress moved backwards: $previous -> ${item.completion}',
+    );
+    previous = item.completion;
+  }
 }
 
 void _testPayloadVectors() {

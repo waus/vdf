@@ -1,9 +1,16 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
 final BigInt one = BigInt.one;
 final BigInt two = BigInt.from(2);
+
+const int _modExpWindowBits = 4;
+const int _progressWordBits = 64;
+const double _progressPhaseHeadroom = 0.98;
+const int _defaultProgressNsPerWindow = 1500;
 
 const List<int> _nextPrimeSmallTable = <int>[
   2,
@@ -206,6 +213,16 @@ class Proof {
   final Uint8List pi;
 }
 
+final class ProveProgress {
+  const ProveProgress({
+    required this.completion,
+    required this.elapsed,
+  });
+
+  final double completion;
+  final Duration elapsed;
+}
+
 class EvaluationResult {
   EvaluationResult({required this.pi, required this.y});
 
@@ -405,6 +422,145 @@ class Wesolowski {
     return Proof(y: yBytes, pi: _bigIntToBytes(pi));
   }
 
+  Future<Proof> proveAsync(
+    Uint8List payload,
+    int difficulty, {
+    Duration progressInterval = const Duration(milliseconds: 50),
+    void Function(ProveProgress progress)? onProgress,
+  }) async {
+    final elapsed = Stopwatch()..start();
+    _emitProveProgress(onProgress, 0, elapsed.elapsed);
+
+    if (difficulty < 0) {
+      throw ArgumentError('difficulty must be non-negative, got $difficulty');
+    }
+    if (progressInterval <= Duration.zero) {
+      throw ArgumentError('progressInterval must be positive');
+    }
+
+    final firstWindows = _estimateExpWindowsForBitLength(difficulty + 1);
+    final messages = ReceivePort();
+    Isolate? isolate;
+    Timer? progressTimer;
+    var currentBase = 0.0;
+    var currentWeight = 0.5;
+    var currentWindows = firstWindows;
+    var currentNsPerWindow = _defaultProgressNsPerWindow;
+    final phaseElapsed = Stopwatch();
+    var completed = false;
+
+    void stopProgressTimer() {
+      progressTimer?.cancel();
+      progressTimer = null;
+      phaseElapsed.stop();
+    }
+
+    void startProgressTimer({
+      required double base,
+      required double weight,
+      required int windows,
+      required int nsPerWindow,
+    }) {
+      stopProgressTimer();
+      if (weight <= 0) {
+        return;
+      }
+
+      currentBase = base;
+      currentWeight = weight;
+      currentWindows = windows <= 0 ? 1 : windows;
+      currentNsPerWindow =
+          nsPerWindow <= 0 ? _defaultProgressNsPerWindow : nsPerWindow;
+      phaseElapsed
+        ..reset()
+        ..start();
+
+      progressTimer = Timer.periodic(progressInterval, (_) {
+        final estimate = _progressPhaseEstimate(
+          currentWindows,
+          currentNsPerWindow,
+          progressInterval,
+        );
+        var frac = phaseElapsed.elapsedMicroseconds / estimate.inMicroseconds;
+        if (frac < 0) {
+          frac = 0;
+        }
+        if (frac > _progressPhaseHeadroom) {
+          frac = _progressPhaseHeadroom;
+        }
+        _emitProveProgress(
+          onProgress,
+          currentBase + currentWeight * frac,
+          elapsed.elapsed,
+        );
+      });
+    }
+
+    startProgressTimer(
+      base: 0,
+      weight: currentWeight,
+      windows: firstWindows,
+      nsPerWindow: _defaultProgressNsPerWindow,
+    );
+
+    try {
+      isolate = await Isolate.spawn<_ProveIsolateRequest>(
+        _proveIsolate,
+        _ProveIsolateRequest(
+          sendPort: messages.sendPort,
+          modulus: n,
+          k: k,
+          payload: Uint8List.fromList(payload),
+          difficulty: difficulty,
+        ),
+        errorsAreFatal: true,
+        onError: messages.sendPort,
+        onExit: messages.sendPort,
+      );
+
+      await for (final message in messages) {
+        if (message is _ProvePhaseComplete) {
+          stopProgressTimer();
+
+          final totalWindows = message.firstWindows + message.secondWindows;
+          final firstWeight =
+              totalWindows > 0 ? message.firstWindows / totalWindows : 0.5;
+          _emitProveProgress(onProgress, firstWeight, elapsed.elapsed);
+
+          final nsPerWindow = _estimateNsPerWindow(
+            message.elapsed,
+            message.firstWindows,
+          );
+          startProgressTimer(
+            base: firstWeight,
+            weight: 1 - firstWeight,
+            windows: message.secondWindows,
+            nsPerWindow: nsPerWindow,
+          );
+        } else if (message is _ProveIsolateResult) {
+          stopProgressTimer();
+          completed = true;
+          _emitProveProgress(onProgress, 1, elapsed.elapsed);
+          return Proof(y: message.y, pi: message.pi);
+        } else if (message is _ProveIsolateError) {
+          throw StateError(message.message);
+        } else if (message == null) {
+          throw StateError('prove isolate exited without returning a proof');
+        } else if (message is List && message.length >= 2) {
+          throw StateError('${message[0]}\n${message[1]}');
+        }
+      }
+
+      throw StateError('prove isolate exited without returning a proof');
+    } finally {
+      stopProgressTimer();
+      messages.close();
+      if (!completed) {
+        isolate?.kill(priority: Isolate.immediate);
+      }
+    }
+  }
+
   bool verify(Uint8List payload, int difficulty, Proof proof) {
     if (difficulty < 0) {
       throw ArgumentError('difficulty must be non-negative, got $difficulty');
@@ -484,6 +640,161 @@ class Wesolowski {
 
 BigInt twoPow(int power) {
   return one << power;
+}
+
+void _proveIsolate(_ProveIsolateRequest request) {
+  try {
+    final vdf = Wesolowski._(
+      n: request.modulus,
+      lambda: request.modulus.bitLength,
+      k: request.k,
+      random: Random(0),
+    );
+    final x = vdf._inputFromPayload(request.payload);
+    final exp = twoPow(request.difficulty);
+    final firstWindows = _estimateExpWindows(exp);
+
+    final stageOne = Stopwatch()..start();
+    final y = x.modPow(exp, vdf.n);
+    stageOne.stop();
+    final yBytes = _bigIntToBytes(y);
+
+    final l = vdf._primeFromStatement(
+      request.payload,
+      request.difficulty,
+      yBytes,
+    );
+    final q = exp ~/ l;
+    final secondWindows = _estimateExpWindows(q);
+
+    request.sendPort.send(
+      _ProvePhaseComplete(
+        firstWindows: firstWindows,
+        secondWindows: secondWindows,
+        elapsed: stageOne.elapsed,
+      ),
+    );
+
+    final pi = x.modPow(q, vdf.n);
+    request.sendPort.send(
+      _ProveIsolateResult(y: yBytes, pi: _bigIntToBytes(pi)),
+    );
+  } catch (e, st) {
+    request.sendPort.send(_ProveIsolateError('$e\n$st'));
+  }
+}
+
+void _emitProveProgress(
+  void Function(ProveProgress progress)? onProgress,
+  double completion,
+  Duration elapsed,
+) {
+  if (onProgress == null) {
+    return;
+  }
+  onProgress(
+      ProveProgress(completion: _clampProgress(completion), elapsed: elapsed));
+}
+
+double _clampProgress(double value) {
+  if (value.isNaN || value < 0) {
+    return 0;
+  }
+  if (value > 1) {
+    return 1;
+  }
+  return value;
+}
+
+int _estimateExpWindows(BigInt? exp) {
+  if (exp == null || exp <= BigInt.zero) {
+    return 1;
+  }
+
+  return _estimateExpWindowsForBitLength(exp.bitLength);
+}
+
+int _estimateExpWindowsForBitLength(int bitLen) {
+  if (bitLen <= 0) {
+    return 1;
+  }
+  if (bitLen <= _progressWordBits) {
+    return 1;
+  }
+
+  final words = (bitLen + _progressWordBits - 1) ~/ _progressWordBits;
+  var windowsPerWord = _progressWordBits ~/ _modExpWindowBits;
+  if (windowsPerWord < 1) {
+    windowsPerWord = 1;
+  }
+  return words * windowsPerWord;
+}
+
+int _estimateNsPerWindow(Duration duration, int windows) {
+  if (duration <= Duration.zero || windows <= 0) {
+    return _defaultProgressNsPerWindow;
+  }
+
+  final ns = duration.inMicroseconds * 1000 ~/ windows;
+  if (ns <= 0) {
+    return _defaultProgressNsPerWindow;
+  }
+  return ns;
+}
+
+Duration _progressPhaseEstimate(
+  int windows,
+  int nsPerWindow,
+  Duration progressInterval,
+) {
+  final safeWindows = windows <= 0 ? 1 : windows;
+  final safeNs = nsPerWindow <= 0 ? _defaultProgressNsPerWindow : nsPerWindow;
+  var estimate = Duration(microseconds: (safeWindows * safeNs) ~/ 1000);
+  if (estimate < progressInterval) {
+    estimate = progressInterval;
+  }
+  return estimate;
+}
+
+class _ProveIsolateRequest {
+  _ProveIsolateRequest({
+    required this.sendPort,
+    required this.modulus,
+    required this.k,
+    required this.payload,
+    required this.difficulty,
+  });
+
+  final SendPort sendPort;
+  final BigInt modulus;
+  final int k;
+  final Uint8List payload;
+  final int difficulty;
+}
+
+class _ProvePhaseComplete {
+  _ProvePhaseComplete({
+    required this.firstWindows,
+    required this.secondWindows,
+    required this.elapsed,
+  });
+
+  final int firstWindows;
+  final int secondWindows;
+  final Duration elapsed;
+}
+
+class _ProveIsolateResult {
+  _ProveIsolateResult({required this.y, required this.pi});
+
+  final Uint8List y;
+  final Uint8List pi;
+}
+
+class _ProveIsolateError {
+  _ProveIsolateError(this.message);
+
+  final String message;
 }
 
 BigInt nextPrime(BigInt? n) {
