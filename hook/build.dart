@@ -46,6 +46,13 @@ void main(List<String> args) async {
 }
 
 Future<_OpenSslConfig> _discoverOpenSsl(OS targetOS) async {
+  if (targetOS == OS.windows) {
+    final config = _discoverWindowsOpenSsl();
+    if (config != null) {
+      return config;
+    }
+  }
+
   if (targetOS == OS.macOS) {
     for (final prefix in const [
       '/opt/homebrew/opt/openssl@3',
@@ -74,6 +81,35 @@ Future<_OpenSslConfig> _discoverOpenSsl(OS targetOS) async {
   }
 
   return const _OpenSslConfig(libraries: ['crypto']);
+}
+
+_OpenSslConfig? _discoverWindowsOpenSsl() {
+  final roots = <String>[
+    if (Platform.environment['OPENSSL_ROOT'] case final root?)
+      if (root.isNotEmpty) root,
+    r'C:\Program Files\OpenSSL',
+    r'C:\Program Files\OpenSSL-Win64',
+    r'C:\OpenSSL',
+    r'C:\OpenSSL-Win64',
+    r'C:\tools\OpenSSL',
+    r'C:\tools\OpenSSL-Win64',
+  ];
+
+  for (final root in roots) {
+    final includeDir = Directory('$root\\include');
+    final libDir = Directory('$root\\lib');
+    final header = File('${includeDir.path}\\openssl\\bn.h');
+    final importLibrary = File('${libDir.path}\\libcrypto.lib');
+    if (header.existsSync() && importLibrary.existsSync()) {
+      return _OpenSslConfig(
+        libraryDirectories: [libDir.path],
+        libraries: const ['libcrypto'],
+        flags: ['/I${includeDir.path}'],
+      );
+    }
+  }
+
+  return null;
 }
 
 Future<_OpenSslConfig?> _pkgConfigOpenSsl() async {
