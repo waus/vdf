@@ -97,12 +97,12 @@ _OpenSslConfig? _discoverWindowsOpenSsl() {
 
   for (final root in roots) {
     final includeDir = Directory('$root\\include');
-    final libDir = Directory('$root\\lib');
     final header = File('${includeDir.path}\\openssl\\bn.h');
-    final importLibrary = File('${libDir.path}\\libcrypto.lib');
-    if (header.existsSync() && importLibrary.existsSync()) {
+    final importLibrary = _findWindowsImportLibrary(root);
+    if (header.existsSync() && importLibrary != null) {
       return _OpenSslConfig(
-        libraryDirectories: [libDir.path],
+        includeDirectories: [includeDir.path],
+        libraryDirectories: [importLibrary.parent.path],
         libraries: const ['libcrypto'],
         flags: ['/I${includeDir.path}'],
       );
@@ -110,6 +110,25 @@ _OpenSslConfig? _discoverWindowsOpenSsl() {
   }
 
   return null;
+}
+
+File? _findWindowsImportLibrary(String root) {
+  final libDir = Directory('$root\\lib');
+  if (!libDir.existsSync()) {
+    return null;
+  }
+
+  final direct = File('${libDir.path}\\libcrypto.lib');
+  if (direct.existsSync()) {
+    return direct;
+  }
+
+  return libDir
+      .listSync(recursive: true, followLinks: false)
+      .whereType<File>()
+      .where((file) => file.path.toLowerCase().endsWith('\\libcrypto.lib'))
+      .cast<File?>()
+      .firstWhere((file) => file != null, orElse: () => null);
 }
 
 Future<_OpenSslConfig?> _pkgConfigOpenSsl() async {
