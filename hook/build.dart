@@ -141,7 +141,7 @@ Future<_OpenSslConfig?> _pkgConfigOpenSsl(OS targetOS) async {
       '--cflags',
       '--libs',
       'openssl',
-    ]);
+    ], runInShell: targetOS == OS.windows);
   } on ProcessException {
     return null;
   }
