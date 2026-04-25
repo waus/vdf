@@ -47,10 +47,17 @@ void main(List<String> args) async {
 
 Future<_OpenSslConfig> _discoverOpenSsl(OS targetOS) async {
   if (targetOS == OS.windows) {
+    final pkgConfig = await _pkgConfigOpenSsl(targetOS);
+    if (pkgConfig != null) {
+      return pkgConfig;
+    }
+
     final config = _discoverWindowsOpenSsl();
     if (config != null) {
       return config;
     }
+
+    return const _OpenSslConfig(libraries: ['libcrypto']);
   }
 
   if (targetOS == OS.macOS) {
@@ -71,13 +78,9 @@ Future<_OpenSslConfig> _discoverOpenSsl(OS targetOS) async {
     }
   }
 
-  final pkgConfig = await _pkgConfigOpenSsl();
+  final pkgConfig = await _pkgConfigOpenSsl(targetOS);
   if (pkgConfig != null) {
     return pkgConfig;
-  }
-
-  if (targetOS == OS.windows) {
-    return const _OpenSslConfig(libraries: ['libcrypto']);
   }
 
   return const _OpenSslConfig(libraries: ['crypto']);
@@ -131,7 +134,7 @@ File? _findWindowsImportLibrary(String root) {
       .firstWhere((file) => file != null, orElse: () => null);
 }
 
-Future<_OpenSslConfig?> _pkgConfigOpenSsl() async {
+Future<_OpenSslConfig?> _pkgConfigOpenSsl(OS targetOS) async {
   final ProcessResult result;
   try {
     result = await Process.run('pkg-config', const [
@@ -158,27 +161,34 @@ Future<_OpenSslConfig?> _pkgConfigOpenSsl() async {
       includes.add(tokens[++i]);
     } else if (token.startsWith('-I') && token.length > 2) {
       includes.add(token.substring(2));
+    } else if (token == '/I' && i + 1 < tokens.length) {
+      includes.add(tokens[++i]);
+    } else if (token.startsWith('/I') && token.length > 2) {
+      includes.add(token.substring(2));
     } else if (token == '-L' && i + 1 < tokens.length) {
       libraryDirectories.add(tokens[++i]);
     } else if (token.startsWith('-L') && token.length > 2) {
       libraryDirectories.add(token.substring(2));
     } else if (token == '-l' && i + 1 < tokens.length) {
       final library = tokens[++i];
-      if (library == 'crypto') {
-        libraries.add(library);
+      final normalizedLibrary = _normalizeLibraryName(targetOS, library);
+      if (_isOpenSslCryptoLibrary(normalizedLibrary)) {
+        libraries.add(normalizedLibrary);
       }
     } else if (token.startsWith('-l') && token.length > 2) {
       final library = token.substring(2);
-      if (library == 'crypto') {
-        libraries.add(library);
+      final normalizedLibrary = _normalizeLibraryName(targetOS, library);
+      if (_isOpenSslCryptoLibrary(normalizedLibrary)) {
+        libraries.add(normalizedLibrary);
       }
     } else if (token.isNotEmpty) {
       flags.add(token);
     }
   }
 
-  if (!libraries.contains('crypto')) {
-    libraries.add('crypto');
+  final defaultLibrary = targetOS == OS.windows ? 'libcrypto' : 'crypto';
+  if (!libraries.contains(defaultLibrary)) {
+    libraries.add(defaultLibrary);
   }
 
   return _OpenSslConfig(
@@ -187,6 +197,17 @@ Future<_OpenSslConfig?> _pkgConfigOpenSsl() async {
     libraries: libraries,
     flags: flags,
   );
+}
+
+String _normalizeLibraryName(OS targetOS, String library) {
+  if (targetOS == OS.windows && library == 'crypto') {
+    return 'libcrypto';
+  }
+  return library;
+}
+
+bool _isOpenSslCryptoLibrary(String library) {
+  return library == 'crypto' || library == 'libcrypto';
 }
 
 List<String> _splitShellWords(String input) {
