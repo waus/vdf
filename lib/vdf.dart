@@ -596,7 +596,11 @@ class Wesolowski {
     final x = _inputFromPayload(payload);
     final y = _bigIntFromBytes(proof.y);
     final pi = _bigIntFromBytes(proof.pi);
-    final l = _primeFromStatement(payload, difficulty, proof.y);
+    if (y >= n || pi >= n) {
+      return false;
+    }
+    final yBytes = _bigIntToBytes(y);
+    final l = _primeFromStatement(payload, difficulty, yBytes);
 
     return naiveVerify(x, y, difficulty, l, pi);
   }

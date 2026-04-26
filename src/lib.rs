@@ -45,6 +45,14 @@ pub enum VdfError {
     EmptyProofPi,
 }
 
+fn hash_byte_len(k: usize) -> Result<usize, VdfError> {
+    let bits = k
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(7))
+        .ok_or(VdfError::InvalidK { got: k })?;
+    Ok((bits / 8).max(32))
+}
+
 #[derive(Debug, Clone)]
 pub struct Wesolowski {
     n: BigUint,
@@ -60,6 +68,7 @@ impl Wesolowski {
         if k < 2 {
             return Err(VdfError::InvalidK { got: k });
         }
+        hash_byte_len(k)?;
 
         let lambda = modulus.bits() as usize;
         Ok(Self {
@@ -100,11 +109,11 @@ impl Wesolowski {
         }
 
         let difficulty = difficulty as usize;
-        let x = self.input_from_payload(payload);
+        let x = self.input_from_payload(payload)?;
         let exp = two_pow(difficulty);
         let y = x.modpow(&exp, &self.n);
         let y_bytes = biguint_to_bytes(&y);
-        let l = self.prime_from_statement(payload, difficulty, &y_bytes);
+        let l = self.prime_from_statement(payload, difficulty, &y_bytes)?;
 
         let q = &exp / &l;
         let pi = x.modpow(&q, &self.n);
@@ -131,10 +140,14 @@ impl Wesolowski {
         }
 
         let difficulty = difficulty as usize;
-        let x = self.input_from_payload(payload);
+        let x = self.input_from_payload(payload)?;
         let y = BigUint::from_bytes_be(&proof.y);
         let pi = BigUint::from_bytes_be(&proof.pi);
-        let l = self.prime_from_statement(payload, difficulty, &proof.y);
+        if y >= self.n || pi >= self.n {
+            return Ok(false);
+        }
+        let y_bytes = biguint_to_bytes(&y);
+        let l = self.prime_from_statement(payload, difficulty, &y_bytes)?;
 
         Ok(self.naive_verify(&x, &y, difficulty, &l, &pi))
     }
@@ -157,18 +170,23 @@ impl Wesolowski {
         (left * right) % &self.n == *y
     }
 
-    fn input_from_payload(&self, payload: &[u8]) -> BigUint {
-        let mut x = self.expand_hash_to_int("rsavdf:x:v1", 0, payload, None);
+    fn input_from_payload(&self, payload: &[u8]) -> Result<BigUint, VdfError> {
+        let mut x = self.expand_hash_to_int("rsavdf:x:v1", 0, payload, None)?;
         x %= &self.n;
         if x.is_zero() {
             x = BigUint::one();
         }
-        x
+        Ok(x)
     }
 
-    fn prime_from_statement(&self, payload: &[u8], difficulty: usize, output: &[u8]) -> BigUint {
-        let seed = self.expand_hash_to_int("rsavdf:l:v1", difficulty, payload, Some(output));
-        next_prime(&seed)
+    fn prime_from_statement(
+        &self,
+        payload: &[u8],
+        difficulty: usize,
+        output: &[u8],
+    ) -> Result<BigUint, VdfError> {
+        let seed = self.expand_hash_to_int("rsavdf:l:v1", difficulty, payload, Some(output))?;
+        Ok(next_prime(&seed))
     }
 
     fn expand_hash_to_int(
@@ -177,8 +195,8 @@ impl Wesolowski {
         difficulty: usize,
         payload: &[u8],
         extra: Option<&[u8]>,
-    ) -> BigUint {
-        let byte_len = ((2 * self.k + 7) / 8).max(32);
+    ) -> Result<BigUint, VdfError> {
+        let byte_len = hash_byte_len(self.k)?;
         let mut out = Vec::with_capacity(byte_len + Sha256::output_size());
         let diff_bytes = (difficulty as u64).to_be_bytes();
         let mut counter = 0u32;
@@ -196,7 +214,7 @@ impl Wesolowski {
             counter = counter.wrapping_add(1);
         }
 
-        BigUint::from_bytes_be(&out[..byte_len])
+        Ok(BigUint::from_bytes_be(&out[..byte_len]))
     }
 }
 
@@ -205,13 +223,7 @@ pub fn two_pow(power: usize) -> BigUint {
 }
 
 pub fn verify_exponent(squarings: usize, l: &BigUint) -> BigUint {
-    let phi_l = l - BigUint::one();
-    let tau_mod = if phi_l.is_zero() {
-        BigUint::from(squarings)
-    } else {
-        BigUint::from(squarings) % &phi_l
-    };
-    BigUint::from(2u8).modpow(&tau_mod, l)
+    BigUint::from(2u8).modpow(&BigUint::from(squarings), l)
 }
 
 pub fn next_prime(n: &BigUint) -> BigUint {
@@ -361,7 +373,10 @@ fn ffi_guard<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, ()> {
 }
 
 unsafe fn bytes_from_raw<'a>(ptr: *const u8, len: usize, name: &str) -> Result<&'a [u8], String> {
-    if ptr.is_null() && len != 0 {
+    if len == 0 {
+        return Ok(&[]);
+    }
+    if ptr.is_null() {
         return Err(format!("{name} pointer is null"));
     }
     Ok(std::slice::from_raw_parts(ptr, len))
@@ -391,13 +406,21 @@ unsafe fn write_bytes(
     Ok(())
 }
 
-fn input_from_payload_for_modulus(modulus: &BigUint, k: usize, payload: &[u8]) -> BigUint {
-    let mut x = expand_hash_to_int_for_k("rsavdf:x:v1", k, 0, payload, None);
+fn ffi_hash_byte_len(k: usize) -> Result<usize, String> {
+    hash_byte_len(k).map_err(|_| format!("invalid k: {k}"))
+}
+
+fn input_from_payload_for_modulus(
+    modulus: &BigUint,
+    k: usize,
+    payload: &[u8],
+) -> Result<BigUint, String> {
+    let mut x = expand_hash_to_int_for_k("rsavdf:x:v1", k, 0, payload, None)?;
     x %= modulus;
     if x.is_zero() {
         x = BigUint::one();
     }
-    x
+    Ok(x)
 }
 
 fn prime_from_statement_for_k(
@@ -405,9 +428,9 @@ fn prime_from_statement_for_k(
     payload: &[u8],
     difficulty: usize,
     output: &[u8],
-) -> BigUint {
-    let seed = expand_hash_to_int_for_k("rsavdf:l:v1", k, difficulty, payload, Some(output));
-    next_prime(&seed)
+) -> Result<BigUint, String> {
+    let seed = expand_hash_to_int_for_k("rsavdf:l:v1", k, difficulty, payload, Some(output))?;
+    Ok(next_prime(&seed))
 }
 
 fn expand_hash_to_int_for_k(
@@ -416,8 +439,8 @@ fn expand_hash_to_int_for_k(
     difficulty: usize,
     payload: &[u8],
     extra: Option<&[u8]>,
-) -> BigUint {
-    let byte_len = ((2 * k + 7) / 8).max(32);
+) -> Result<BigUint, String> {
+    let byte_len = ffi_hash_byte_len(k)?;
     let mut out = Vec::with_capacity(byte_len + Sha256::output_size());
     let diff_bytes = (difficulty as u64).to_be_bytes();
     let mut counter = 0u32;
@@ -435,7 +458,7 @@ fn expand_hash_to_int_for_k(
         counter = counter.wrapping_add(1);
     }
 
-    BigUint::from_bytes_be(&out[..byte_len])
+    Ok(BigUint::from_bytes_be(&out[..byte_len]))
 }
 
 #[no_mangle]
@@ -508,11 +531,11 @@ pub unsafe extern "C" fn vdfrsa_ctx_prove(
         }
         let payload = bytes_from_raw(payload, payload_len, "payload")?;
         let difficulty = difficulty as usize;
-        let x = input_from_payload_for_modulus(&ctx.modulus, k as usize, payload);
+        let x = input_from_payload_for_modulus(&ctx.modulus, k as usize, payload)?;
         let exp = two_pow(difficulty);
         let y = x.modpow(&exp, &ctx.modulus);
         let y_bytes = biguint_to_bytes(&y);
-        let l = prime_from_statement_for_k(k as usize, payload, difficulty, &y_bytes);
+        let l = prime_from_statement_for_k(k as usize, payload, difficulty, &y_bytes)?;
         let q = &exp / &l;
         let pi = x.modpow(&q, &ctx.modulus);
         write_bytes(out_y, out_y_len, y_bytes)?;
@@ -551,11 +574,11 @@ pub unsafe extern "C" fn vdfrsa_ctx_prove_stage1(
         }
         let payload = bytes_from_raw(payload, payload_len, "payload")?;
         let difficulty = difficulty as usize;
-        let x = input_from_payload_for_modulus(&ctx.modulus, k as usize, payload);
+        let x = input_from_payload_for_modulus(&ctx.modulus, k as usize, payload)?;
         let exp = two_pow(difficulty);
         let y = x.modpow(&exp, &ctx.modulus);
         let y_bytes = biguint_to_bytes(&y);
-        let l = prime_from_statement_for_k(k as usize, payload, difficulty, &y_bytes);
+        let l = prime_from_statement_for_k(k as usize, payload, difficulty, &y_bytes)?;
         let q = &exp / &l;
         let second_work = estimate_exp_work(&q) as i64;
         let session = Box::new(VdfrsaProveSession {
@@ -703,6 +726,50 @@ mod tests {
     }
 
     #[test]
+    fn verify_canonicalizes_y_before_challenge_hash() {
+        let vector = &VECTORS[1];
+        let modulus = BigUint::from_bytes_be(&hex::decode(vector.modulus_hex).unwrap());
+        let vdf = Wesolowski::with_modulus(modulus, 128).unwrap();
+        let proof = vdf.prove(vector.payload, vector.difficulty).unwrap();
+        let mut non_canonical = proof.clone();
+        non_canonical.y.insert(0, 0);
+
+        assert!(vdf
+            .verify(vector.payload, vector.difficulty, &non_canonical)
+            .unwrap());
+    }
+
+    #[test]
+    fn verify_rejects_out_of_range_proof_values() {
+        let vector = &VECTORS[1];
+        let modulus = BigUint::from_bytes_be(&hex::decode(vector.modulus_hex).unwrap());
+        let vdf = Wesolowski::with_modulus(modulus.clone(), 128).unwrap();
+        let proof = vdf.prove(vector.payload, vector.difficulty).unwrap();
+
+        let mut y_out_of_range = proof.clone();
+        y_out_of_range.y = biguint_to_bytes(&(BigUint::from_bytes_be(&proof.y) + &modulus));
+        assert!(!vdf
+            .verify(vector.payload, vector.difficulty, &y_out_of_range)
+            .unwrap());
+
+        let mut pi_out_of_range = proof.clone();
+        pi_out_of_range.pi = biguint_to_bytes(&(BigUint::from_bytes_be(&proof.pi) + &modulus));
+        assert!(!vdf
+            .verify(vector.payload, vector.difficulty, &pi_out_of_range)
+            .unwrap());
+    }
+
+    #[test]
+    fn rejects_k_that_overflows_hash_byte_len() {
+        let modulus = BigUint::from_bytes_be(&hex::decode(VECTORS[0].modulus_hex).unwrap());
+        assert!(matches!(
+            Wesolowski::with_modulus(modulus.clone(), usize::MAX),
+            Err(VdfError::InvalidK { got }) if got == usize::MAX
+        ));
+        assert!(ffi_hash_byte_len(usize::MAX).is_err());
+    }
+
+    #[test]
     fn proove_alias_delegates_to_prove() {
         let vector = &VECTORS[0];
         let modulus = BigUint::from_bytes_be(&hex::decode(vector.modulus_hex).unwrap());
@@ -712,5 +779,48 @@ mod tests {
             vdf.prove(vector.payload, vector.difficulty).unwrap(),
             vdf.proove(vector.payload, vector.difficulty).unwrap()
         );
+    }
+
+    #[test]
+    fn verify_exponent_handles_even_modulus() {
+        assert_eq!(verify_exponent(1, &BigUint::from(2u8)), BigUint::zero());
+    }
+
+    #[test]
+    fn ffi_accepts_empty_payload_null_pointer() {
+        let vector = &VECTORS[0];
+        let modulus = hex::decode(vector.modulus_hex).unwrap();
+
+        unsafe {
+            let ctx = vdfrsa_ctx_new(modulus.as_ptr(), modulus.len());
+            assert!(!ctx.is_null());
+
+            let mut y = ptr::null_mut();
+            let mut y_len = 0usize;
+            let mut pi = ptr::null_mut();
+            let mut pi_len = 0usize;
+
+            let rc = vdfrsa_ctx_prove(
+                ctx,
+                128,
+                ptr::null(),
+                0,
+                4,
+                &mut y,
+                &mut y_len,
+                &mut pi,
+                &mut pi_len,
+            );
+
+            assert_eq!(rc, 0);
+            assert!(!y.is_null());
+            assert!(y_len > 0);
+            assert!(!pi.is_null());
+            assert!(pi_len > 0);
+
+            vdfrsa_buffer_free(y);
+            vdfrsa_buffer_free(pi);
+            vdfrsa_ctx_free(ctx);
+        }
     }
 }

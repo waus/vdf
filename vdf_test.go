@@ -182,6 +182,65 @@ func TestPayloadAPIProveAndVerify(t *testing.T) {
 	}
 }
 
+func TestPayloadAPIVerifyCanonicalizesYBytes(t *testing.T) {
+	vdf, err := New(128, 32)
+	if err != nil {
+		t.Fatalf("new vdf: %v", err)
+	}
+
+	payload := []byte("hello payload")
+	proof, err := vdf.Prove(payload, 10)
+	if err != nil {
+		t.Fatalf("prove: %v", err)
+	}
+	proof.Y = append([]byte{0}, proof.Y...)
+
+	ok, err := vdf.Verify(payload, 10, proof)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected padded y proof to verify")
+	}
+}
+
+func TestPayloadAPIVerifyRejectsOutOfRangeProofValues(t *testing.T) {
+	vdf, err := New(128, 32)
+	if err != nil {
+		t.Fatalf("new vdf: %v", err)
+	}
+
+	payload := []byte("hello payload")
+	proof, err := vdf.Prove(payload, 10)
+	if err != nil {
+		t.Fatalf("prove: %v", err)
+	}
+
+	yProof := &Proof{
+		Y:  new(big.Int).Add(new(big.Int).SetBytes(proof.Y), vdf.N).Bytes(),
+		Pi: proof.Pi,
+	}
+	ok, err := vdf.Verify(payload, 10, yProof)
+	if err != nil {
+		t.Fatalf("verify y >= n: %v", err)
+	}
+	if ok {
+		t.Fatal("expected y >= n to fail")
+	}
+
+	piProof := &Proof{
+		Y:  proof.Y,
+		Pi: new(big.Int).Add(new(big.Int).SetBytes(proof.Pi), vdf.N).Bytes(),
+	}
+	ok, err = vdf.Verify(payload, 10, piProof)
+	if err != nil {
+		t.Fatalf("verify pi >= n: %v", err)
+	}
+	if ok {
+		t.Fatal("expected pi >= n to fail")
+	}
+}
+
 func TestPayloadAPIDetectsPayloadMismatch(t *testing.T) {
 	vdf, err := New(128, 32)
 	if err != nil {

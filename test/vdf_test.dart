@@ -74,6 +74,14 @@ Future<void> main() async {
     _NamedTest('aggregate and verify', _testAggregateAndVerify),
     _NamedTest('verify rejects wrong output', _testVerifyRejectsWrongOutput),
     _NamedTest('payload prove and verify', _testPayloadApiProveAndVerify),
+    _NamedTest(
+      'payload verify canonicalizes y bytes',
+      _testPayloadVerifyCanonicalizesY,
+    ),
+    _NamedTest(
+      'payload verify rejects out-of-range proof values',
+      _testPayloadVerifyRejectsOutOfRangeValues,
+    ),
     _NamedTest('payload mismatch fails', _testPayloadMismatch),
     _NamedTest('difficulty mismatch fails', _testDifficultyMismatch),
     _NamedTest('public params cross-instance verification', _testPublicParams),
@@ -217,6 +225,36 @@ void _testPayloadApiProveAndVerify() {
   final proof = vdf.prove(_bytes('hello payload'), 10);
   final ok = vdf.verify(_bytes('hello payload'), 10, proof);
   _expect(ok, 'expected payload proof to verify');
+}
+
+void _testPayloadVerifyCanonicalizesY() {
+  final vdf = Wesolowski.create(128, 32);
+  final payload = _bytes('hello payload');
+  final proof = vdf.prove(payload, 10);
+  final paddedProof = Proof(
+    y: Uint8List.fromList(<int>[0, ...proof.y]),
+    pi: proof.pi,
+  );
+  final ok = vdf.verify(payload, 10, paddedProof);
+  _expect(ok, 'expected padded y proof to verify');
+}
+
+void _testPayloadVerifyRejectsOutOfRangeValues() {
+  final vdf = Wesolowski.create(128, 32);
+  final payload = _bytes('hello payload');
+  final proof = vdf.prove(payload, 10);
+
+  final yProof = Proof(
+    y: _bigIntToBytes(_bigIntFromBytes(proof.y) + vdf.n),
+    pi: proof.pi,
+  );
+  _expect(!vdf.verify(payload, 10, yProof), 'expected y >= n to fail');
+
+  final piProof = Proof(
+    y: proof.y,
+    pi: _bigIntToBytes(_bigIntFromBytes(proof.pi) + vdf.n),
+  );
+  _expect(!vdf.verify(payload, 10, piProof), 'expected pi >= n to fail');
 }
 
 void _testPayloadMismatch() {
@@ -363,6 +401,27 @@ BigInt _decodeHexInt(String hex) {
     return BigInt.zero;
   }
   return BigInt.parse(clean, radix: 16);
+}
+
+BigInt _bigIntFromBytes(Uint8List bytes) {
+  var value = BigInt.zero;
+  for (final b in bytes) {
+    value = (value << 8) | BigInt.from(b);
+  }
+  return value;
+}
+
+Uint8List _bigIntToBytes(BigInt value) {
+  if (value == BigInt.zero) {
+    return Uint8List(0);
+  }
+  final bytes = <int>[];
+  var current = value;
+  while (current > BigInt.zero) {
+    bytes.add((current & BigInt.from(0xff)).toInt());
+    current >>= 8;
+  }
+  return Uint8List.fromList(bytes.reversed.toList(growable: false));
 }
 
 String _hexEncode(Uint8List bytes) {

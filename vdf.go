@@ -358,7 +358,10 @@ func (w *Wesolowski) Verify(payload []byte, difficulty int, proof *Proof) (bool,
 	x := w.inputFromPayload(payload)
 	y := new(big.Int).SetBytes(proof.Y)
 	pi := new(big.Int).SetBytes(proof.Pi)
-	l := w.primeFromStatement(payload, difficulty, proof.Y)
+	if y.Cmp(w.N) >= 0 || pi.Cmp(w.N) >= 0 {
+		return false, nil
+	}
+	l := w.primeFromStatement(payload, difficulty, y.Bytes())
 
 	return w.NaiveVerify(x, y, difficulty, l, pi)
 }
