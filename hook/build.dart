@@ -2,10 +2,10 @@ import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
-import 'package:native_toolchain_c/native_toolchain_c.dart';
 
+const _crateName = 'optimized_vdf';
 const _libraryName = 'vdfrsa_native';
-const _assetName = 'src/native/openssl_vdf_backend.dart';
+const _assetName = 'src/native/rust_vdf_backend.dart';
 
 void main(List<String> args) async {
   await build(args, (input, output) async {
@@ -14,260 +14,143 @@ void main(List<String> args) async {
     }
 
     final code = input.config.code;
-    if (code.targetOS != OS.macOS &&
-        code.targetOS != OS.linux &&
-        code.targetOS != OS.windows) {
-      return;
-    }
+    final target = _rustTarget(code);
+    final targetDir = Directory.fromUri(input.outputDirectory.resolve('cargo/'))
+      ..createSync(recursive: true);
 
-    if (code.targetOS == OS.macOS &&
-        code.targetArchitecture != Architecture.arm64) {
-      throw UnsupportedError(
-        'vdfrsa native backend supports macOS arm64, got '
-        '${code.targetArchitecture.name}.',
+    final environment = _cargoEnvironment(code, target);
+    final result = await Process.run(
+      'cargo',
+      <String>[
+        'build',
+        '--release',
+        '--lib',
+        '--target',
+        target,
+        '--target-dir',
+        targetDir.path,
+      ],
+      workingDirectory: input.packageRoot.toFilePath(),
+      environment: environment,
+    );
+
+    if (result.exitCode != 0) {
+      throw StateError(
+        'Rust native backend build failed for $target\n'
+        'stdout:\n${result.stdout}\n'
+        'stderr:\n${result.stderr}',
       );
     }
 
-    final openssl = await _discoverOpenSsl(code.targetOS);
-    final builder = CBuilder.library(
-      name: _libraryName,
-      assetName: _assetName,
-      sources: ['native/openssl_vdf.c', ...openssl.extraSources],
-      includes: ['native', ...openssl.includeDirectories],
-      libraries: openssl.libraries,
-      libraryDirectories: openssl.libraryDirectories,
-      flags: openssl.flags,
-      linkModePreference: LinkModePreference.dynamic,
-      std: 'c11',
+    final source = File(
+      _cargoLibraryPath(targetDir.path, target, code.targetOS),
     );
+    if (!source.existsSync()) {
+      throw StateError('Rust build did not produce ${source.path}');
+    }
 
-    await builder.run(input: input, output: output);
+    final assetFileName = code.targetOS.libraryFileName(
+      _libraryName,
+      DynamicLoadingBundled(),
+    );
+    final asset = File.fromUri(input.outputDirectory.resolve(assetFileName));
+    asset.parent.createSync(recursive: true);
+    source.copySync(asset.path);
+
+    output.dependencies.add(Uri.file('Cargo.toml'));
+    output.dependencies.add(Uri.file('Cargo.lock'));
+    output.dependencies.add(Uri.file('src/lib.rs'));
+    output.assets.code.add(
+      CodeAsset(
+        package: input.packageName,
+        name: _assetName,
+        file: asset.uri,
+        linkMode: DynamicLoadingBundled(),
+      ),
+    );
   });
 }
 
-Future<_OpenSslConfig> _discoverOpenSsl(OS targetOS) async {
-  if (targetOS == OS.windows) {
-    final pkgConfig = await _pkgConfigOpenSsl(targetOS);
-    if (pkgConfig != null) {
-      return pkgConfig;
-    }
+String _rustTarget(CodeConfig code) {
+  final os = code.targetOS;
+  final arch = code.targetArchitecture;
 
-    final config = _discoverWindowsOpenSsl();
-    if (config != null) {
-      return config;
-    }
-
-    return const _OpenSslConfig(libraries: ['libcrypto']);
+  if (os == OS.macOS) {
+    if (arch == Architecture.arm64) return 'aarch64-apple-darwin';
+    if (arch == Architecture.x64) return 'x86_64-apple-darwin';
   }
-
-  if (targetOS == OS.macOS) {
-    for (final prefix in const [
-      '/opt/homebrew/opt/openssl@3',
-      '/usr/local/opt/openssl@3',
-    ]) {
-      final includeDir = Directory('$prefix/include');
-      final libDir = Directory('$prefix/lib');
-      final staticCrypto = File('${libDir.path}/libcrypto.a');
-      if (includeDir.existsSync() && staticCrypto.existsSync()) {
-        return _OpenSslConfig(
-          includeDirectories: [includeDir.path],
-          extraSources: [staticCrypto.path],
-          libraries: const [],
-        );
-      }
+  if (os == OS.windows) {
+    if (arch == Architecture.x64) return 'x86_64-pc-windows-msvc';
+    if (arch == Architecture.arm64) return 'aarch64-pc-windows-msvc';
+  }
+  if (os == OS.linux) {
+    if (arch == Architecture.x64) return 'x86_64-unknown-linux-gnu';
+    if (arch == Architecture.arm64) return 'aarch64-unknown-linux-gnu';
+  }
+  if (os == OS.android) {
+    if (arch == Architecture.arm64) return 'aarch64-linux-android';
+    if (arch == Architecture.arm) return 'armv7-linux-androideabi';
+    if (arch == Architecture.x64) return 'x86_64-linux-android';
+  }
+  if (os == OS.iOS) {
+    final sdk = code.iOS.targetSdk;
+    if (sdk == IOSSdk.iPhoneOS && arch == Architecture.arm64) {
+      return 'aarch64-apple-ios';
     }
-  }
-
-  final pkgConfig = await _pkgConfigOpenSsl(targetOS);
-  if (pkgConfig != null) {
-    return pkgConfig;
-  }
-
-  return const _OpenSslConfig(libraries: ['crypto']);
-}
-
-_OpenSslConfig? _discoverWindowsOpenSsl() {
-  final roots = <String>[
-    if (Platform.environment['OPENSSL_ROOT'] case final root?)
-      if (root.isNotEmpty) root,
-    r'C:\Program Files\OpenSSL',
-    r'C:\Program Files\OpenSSL-Win64',
-    r'C:\OpenSSL',
-    r'C:\OpenSSL-Win64',
-    r'C:\tools\OpenSSL',
-    r'C:\tools\OpenSSL-Win64',
-  ];
-
-  for (final root in roots) {
-    final includeDir = Directory('$root\\include');
-    final header = File('${includeDir.path}\\openssl\\bn.h');
-    final importLibrary = _findWindowsImportLibrary(root);
-    if (header.existsSync() && importLibrary != null) {
-      return _OpenSslConfig(
-        includeDirectories: [includeDir.path],
-        libraryDirectories: [importLibrary.parent.path],
-        libraries: const ['libcrypto'],
-        flags: ['/I${includeDir.path}'],
-      );
+    if (sdk == IOSSdk.iPhoneSimulator && arch == Architecture.arm64) {
+      return 'aarch64-apple-ios-sim';
+    }
+    if (sdk == IOSSdk.iPhoneSimulator && arch == Architecture.x64) {
+      return 'x86_64-apple-ios';
     }
   }
 
-  return null;
-}
-
-File? _findWindowsImportLibrary(String root) {
-  final libDir = Directory('$root\\lib');
-  if (!libDir.existsSync()) {
-    return null;
-  }
-
-  final direct = File('${libDir.path}\\libcrypto.lib');
-  if (direct.existsSync()) {
-    return direct;
-  }
-
-  return libDir
-      .listSync(recursive: true, followLinks: false)
-      .whereType<File>()
-      .where((file) => file.path.toLowerCase().endsWith('\\libcrypto.lib'))
-      .cast<File?>()
-      .firstWhere((file) => file != null, orElse: () => null);
-}
-
-Future<_OpenSslConfig?> _pkgConfigOpenSsl(OS targetOS) async {
-  final ProcessResult result;
-  try {
-    result = await Process.run('pkg-config', const [
-      '--cflags',
-      '--libs',
-      'openssl',
-    ], runInShell: targetOS == OS.windows);
-  } on ProcessException {
-    return null;
-  }
-  if (result.exitCode != 0) {
-    return null;
-  }
-
-  final tokens = _splitShellWords('${result.stdout}'.trim());
-  final includes = <String>[];
-  final libraryDirectories = <String>[];
-  final libraries = <String>[];
-  final flags = <String>[];
-
-  for (var i = 0; i < tokens.length; i++) {
-    final token = tokens[i];
-    if (token == '-I' && i + 1 < tokens.length) {
-      includes.add(tokens[++i]);
-    } else if (token.startsWith('-I') && token.length > 2) {
-      includes.add(token.substring(2));
-    } else if (token == '/I' && i + 1 < tokens.length) {
-      includes.add(tokens[++i]);
-    } else if (token.startsWith('/I') && token.length > 2) {
-      includes.add(token.substring(2));
-    } else if (token == '-L' && i + 1 < tokens.length) {
-      libraryDirectories.add(tokens[++i]);
-    } else if (token.startsWith('-L') && token.length > 2) {
-      libraryDirectories.add(token.substring(2));
-    } else if (token == '-l' && i + 1 < tokens.length) {
-      final library = tokens[++i];
-      final normalizedLibrary = _normalizeLibraryName(targetOS, library);
-      if (_isOpenSslCryptoLibrary(normalizedLibrary)) {
-        libraries.add(normalizedLibrary);
-      }
-    } else if (token.startsWith('-l') && token.length > 2) {
-      final library = token.substring(2);
-      final normalizedLibrary = _normalizeLibraryName(targetOS, library);
-      if (_isOpenSslCryptoLibrary(normalizedLibrary)) {
-        libraries.add(normalizedLibrary);
-      }
-    } else if (token.isNotEmpty) {
-      flags.add(token);
-    }
-  }
-
-  final defaultLibrary = targetOS == OS.windows ? 'libcrypto' : 'crypto';
-  if (!libraries.contains(defaultLibrary)) {
-    libraries.add(defaultLibrary);
-  }
-
-  return _OpenSslConfig(
-    includeDirectories: includes,
-    libraryDirectories: libraryDirectories,
-    libraries: libraries,
-    flags: flags,
+  throw UnsupportedError(
+    'Unsupported Rust native target: ${os.name}/${arch.name}',
   );
 }
 
-String _normalizeLibraryName(OS targetOS, String library) {
-  if (targetOS == OS.windows && library == 'crypto') {
-    return 'libcrypto';
-  }
-  return library;
+String _cargoLibraryPath(String targetDir, String target, OS os) {
+  final fileName = switch (os) {
+    OS.windows => '$_crateName.dll',
+    OS.macOS || OS.iOS => 'lib$_crateName.dylib',
+    _ => 'lib$_crateName.so',
+  };
+  return '$targetDir/$target/release/$fileName';
 }
 
-bool _isOpenSslCryptoLibrary(String library) {
-  return library == 'crypto' || library == 'libcrypto';
-}
-
-List<String> _splitShellWords(String input) {
-  if (input.isEmpty) {
-    return const [];
+Map<String, String>? _cargoEnvironment(CodeConfig code, String target) {
+  if (code.targetOS != OS.android) {
+    return null;
   }
 
-  final words = <String>[];
-  final current = StringBuffer();
-  var inSingle = false;
-  var inDouble = false;
-  var escaping = false;
-
-  for (final rune in input.runes) {
-    final char = String.fromCharCode(rune);
-    if (escaping) {
-      current.write(char);
-      escaping = false;
-      continue;
-    }
-    if (char == r'\') {
-      escaping = true;
-      continue;
-    }
-    if (char == "'" && !inDouble) {
-      inSingle = !inSingle;
-      continue;
-    }
-    if (char == '"' && !inSingle) {
-      inDouble = !inDouble;
-      continue;
-    }
-    if (!inSingle && !inDouble && char.trim().isEmpty) {
-      if (current.isNotEmpty) {
-        words.add(current.toString());
-        current.clear();
-      }
-      continue;
-    }
-    current.write(char);
+  final ndk =
+      Platform.environment['ANDROID_NDK_HOME'] ??
+      Platform.environment['ANDROID_NDK_ROOT'];
+  if (ndk == null || ndk.isEmpty) {
+    return null;
   }
 
-  if (current.isNotEmpty) {
-    words.add(current.toString());
+  final host = switch (OS.current) {
+    OS.macOS => 'darwin-x86_64',
+    OS.linux => 'linux-x86_64',
+    OS.windows => 'windows-x86_64',
+    _ => throw UnsupportedError(
+      'Android Rust cross-build is not supported from ${OS.current.name}',
+    ),
+  };
+  final bin = '$ndk/toolchains/llvm/prebuilt/$host/bin';
+  final api = code.android.targetNdkApi;
+  final linker = switch (target) {
+    'aarch64-linux-android' => '$bin/aarch64-linux-android$api-clang',
+    'armv7-linux-androideabi' => '$bin/armv7a-linux-androideabi$api-clang',
+    'x86_64-linux-android' => '$bin/x86_64-linux-android$api-clang',
+    _ => null,
+  };
+  if (linker == null) {
+    return null;
   }
-  return words;
-}
 
-final class _OpenSslConfig {
-  const _OpenSslConfig({
-    this.includeDirectories = const [],
-    this.libraryDirectories = const [],
-    this.libraries = const ['crypto'],
-    this.flags = const [],
-    this.extraSources = const [],
-  });
-
-  final List<String> includeDirectories;
-  final List<String> libraryDirectories;
-  final List<String> libraries;
-  final List<String> flags;
-  final List<String> extraSources;
+  final keyTarget = target.toUpperCase().replaceAll('-', '_');
+  return <String, String>{'CARGO_TARGET_${keyTarget}_LINKER': linker};
 }

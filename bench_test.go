@@ -3,11 +3,14 @@ package vdf
 import (
 	"fmt"
 	"math/big"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 )
 
 func BenchmarkProve(b *testing.B) {
-	benchmarkDifficulties := []int{500, 1000, 10_000, 1_000_000}
+	benchmarkDifficulties := benchmarkDifficulties([]int{500, 1000, 10_000, 1_000_000})
 	payload := []byte("benchmark-payload")
 
 	for _, difficulty := range benchmarkDifficulties {
@@ -26,7 +29,7 @@ func BenchmarkProve(b *testing.B) {
 }
 
 func BenchmarkVerify(b *testing.B) {
-	benchmarkDifficulties := []int{500, 1000, 10000}
+	benchmarkDifficulties := benchmarkDifficulties([]int{500, 1000, 10000})
 	payload := []byte("benchmark-payload")
 
 	for _, difficulty := range benchmarkDifficulties {
@@ -75,4 +78,29 @@ func benchmarkModulus() *big.Int {
 	p := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 521), one)
 	q := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 607), one)
 	return new(big.Int).Mul(p, q)
+}
+
+func benchmarkDifficulties(defaults []int) []int {
+	raw := os.Getenv("VDF_BENCH_DIFFICULTIES")
+	if raw == "" {
+		return defaults
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			panic(fmt.Sprintf("invalid VDF_BENCH_DIFFICULTIES value %q", part))
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		panic("VDF_BENCH_DIFFICULTIES must contain at least one difficulty")
+	}
+	return out
 }

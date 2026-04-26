@@ -1,10 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import '../lib/vdf.dart';
 
-const List<int> _proveDifficulties = <int>[500, 1000, 10000, 1000000];
-const List<int> _verifyDifficulties = <int>[500, 1000, 10000];
+const List<int> _defaultProveDifficulties = <int>[500, 1000, 10000, 1000000];
+const List<int> _defaultVerifyDifficulties = <int>[500, 1000, 10000];
 
 const Map<int, int> _defaultProveIterations = <int, int>{
   500: 8,
@@ -39,7 +40,7 @@ void main(List<String> args) {
 void _benchmarkProve(Uint8List payload, int multiplier) {
   print('BenchmarkProve');
 
-  for (final difficulty in _proveDifficulties) {
+  for (final difficulty in _benchmarkDifficulties(_defaultProveDifficulties)) {
     final iterations = (_defaultProveIterations[difficulty] ?? 1) * multiplier;
     final vdf = _benchmarkVdf();
 
@@ -62,7 +63,7 @@ void _benchmarkProve(Uint8List payload, int multiplier) {
 void _benchmarkVerify(Uint8List payload, int multiplier) {
   print('BenchmarkVerify');
 
-  for (final difficulty in _verifyDifficulties) {
+  for (final difficulty in _benchmarkDifficulties(_defaultVerifyDifficulties)) {
     final iterations = (_defaultVerifyIterations[difficulty] ?? 1) * multiplier;
 
     final prover = _benchmarkVdf();
@@ -96,4 +97,24 @@ BigInt _benchmarkModulus() {
   final p = (BigInt.one << 521) - one;
   final q = (BigInt.one << 607) - one;
   return p * q;
+}
+
+List<int> _benchmarkDifficulties(List<int> defaults) {
+  final raw = Platform.environment['VDF_BENCH_DIFFICULTIES'];
+  if (raw == null || raw.trim().isEmpty) {
+    return defaults;
+  }
+
+  final values = raw
+      .split(',')
+      .map((value) => value.trim())
+      .where((value) => value.isNotEmpty)
+      .map(int.parse)
+      .toList(growable: false);
+  if (values.isEmpty || values.any((value) => value < 0)) {
+    throw ArgumentError(
+      'VDF_BENCH_DIFFICULTIES must contain non-negative integers',
+    );
+  }
+  return values;
 }

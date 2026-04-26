@@ -4,9 +4,9 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'src/native/openssl_vdf_backend.dart';
+import 'src/native/rust_vdf_backend.dart';
 
-export 'src/native/openssl_vdf_backend.dart'
+export 'src/native/rust_vdf_backend.dart'
     show NativeModulusContext, VdfNativeBackend;
 
 final BigInt one = BigInt.one;
@@ -209,18 +209,15 @@ class PublicParams {
 
 class Proof {
   Proof({required Uint8List y, required Uint8List pi})
-      : y = Uint8List.fromList(y),
-        pi = Uint8List.fromList(pi);
+    : y = Uint8List.fromList(y),
+      pi = Uint8List.fromList(pi);
 
   final Uint8List y;
   final Uint8List pi;
 }
 
 final class ProveProgress {
-  const ProveProgress({
-    required this.completion,
-    required this.elapsed,
-  });
+  const ProveProgress({required this.completion, required this.elapsed});
 
   final double completion;
   final Duration elapsed;
@@ -324,8 +321,8 @@ class Wesolowski {
   final int k;
 
   final Random _random;
-  late final NativeModulusContext? _nativeModulus =
-      VdfNativeBackend.instance?.createModulusContext(_bigIntToBytes(n));
+  late final NativeModulusContext? _nativeModulus = VdfNativeBackend.instance
+      ?.createModulusContext(_bigIntToBytes(n));
 
   bool get hasNativeBackend => _nativeModulus != null;
 
@@ -546,8 +543,9 @@ class Wesolowski {
           stopProgressTimer();
 
           final totalWork = message.firstWork + message.secondWork;
-          final firstWeight =
-              totalWork > 0 ? message.firstWork / totalWork : 0.5;
+          final firstWeight = totalWork > 0
+              ? message.firstWork / totalWork
+              : 0.5;
           _emitProveProgress(onProgress, firstWeight, elapsed.elapsed);
 
           final nsPerUnit = _estimateNsPerUnit(
@@ -745,7 +743,8 @@ void _emitProveProgress(
     return;
   }
   onProgress(
-      ProveProgress(completion: _clampProgress(completion), elapsed: elapsed));
+    ProveProgress(completion: _clampProgress(completion), elapsed: elapsed),
+  );
 }
 
 double _clampProgress(double value) {

@@ -199,8 +199,7 @@ final class _NativeAllocator {
   }
 }
 
-const String _nativeAssetId =
-    'package:vdfrsa/src/native/openssl_vdf_backend.dart';
+const String _nativeAssetId = 'package:vdfrsa/src/native/rust_vdf_backend.dart';
 
 abstract interface class _NativeBindings {
   _CtxNewDart get ctxNew;

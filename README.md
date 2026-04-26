@@ -81,46 +81,84 @@ final proof = await vdf.proveAsync(
 Run tests:
 
 ```bash
-/Users/user/sdk/flutter/bin/dart run test/vdf_test.dart
+flutter/bin/dart run test/vdf_test.dart
 ```
 
 Run benchmarks:
 
 ```bash
-/Users/user/sdk/flutter/bin/dart run benchmark/bench.dart
+flutter/bin/dart run benchmark/bench.dart
 ```
+
+## Rust RSA-group port
+
+High-level API:
+
+```rust
+let vdf = optimized_vdf::Wesolowski::with_modulus(modulus, 128)?;
+let proof = vdf.prove(b"payload", 20)?;
+let ok = vdf.verify(b"payload", 20, &proof)?;
+```
+
+Run tests:
+
+```bash
+cargo test
+```
+
+Run the Rust benchmark:
+
+```bash
+cargo run --release --bin bench -- 15000000
+```
+
+Compare payload proving at a large difficulty across implementations:
+
+```bash
+cargo run --release --bin bench -- 15000000
+VDF_BENCH_DIFFICULTIES=15000000 go test -run '^$' -bench 'BenchmarkProve' -benchtime=1x
+VDF_BENCH_DIFFICULTIES=15000000 flutter/bin/dart run benchmark/bench.dart
+```
+
+The Dart benchmark uses the native Rust backend automatically when it is
+available through the package's normal native asset loading or
+`VDFRSA_NATIVE_LIB`.
 
 Run the demo CLI:
 
 ```bash
-/Users/user/sdk/flutter/bin/dart run bin/rsa_vdf.dart 15 10
+flutter/bin/dart run bin/rsa_vdf.dart 15 10
 ```
 
-Native acceleration is built and bundled through Dart/Flutter native assets.
-Install OpenSSL first on macOS:
+Native acceleration is built from Rust and bundled through Dart/Flutter native
+assets. Install the Rust toolchain and the target triples you need:
 
 ```bash
-brew install openssl@3
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 ```
 
 Then run the Dart or Flutter app normally:
 
 ```bash
-/Users/user/sdk/flutter/bin/dart run example/native_backend_status.dart
-/Users/user/sdk/flutter/bin/flutter run -d macos
+flutter/bin/dart run example/native_backend_status.dart
+flutter/bin/flutter run -d macos
 ```
 
-The native assets build hook compiles `native/openssl_vdf.c`, links it with
-OpenSSL Crypto, and bundles `libvdfrsa_native.dylib`/`.so`/`.dll` into the
-consuming application. In Flutter macOS debug builds the library is expected in
-the app bundle under `Contents/Frameworks/libvdfrsa_native.dylib`.
+The native assets build hook runs `cargo build --release --target <triple>` and
+bundles
+`libvdfrsa_native.dylib`/`.so`/`.dll` into the consuming application. In Flutter
+macOS debug builds the library is expected in the app bundle under
+`Contents/Frameworks/libvdfrsa_native.dylib`.
 
 Manual native-library override remains available for debugging:
 
 ```bash
-cmake -S native -B build/native
-cmake --build build/native
-export VDFRSA_NATIVE_LIB="$PWD/build/native/libvdfrsa_native.dylib" # macOS
+cargo build --release
+export VDFRSA_NATIVE_LIB="$PWD/target/release/liboptimized_vdf.dylib" # macOS
 ```
 
 `VDFRSA_NATIVE_LIB` takes precedence over the bundled asset. When neither the
@@ -128,6 +166,6 @@ override nor the bundled asset can be loaded, the package keeps the pure Dart
 fallback and exposes the reason through `VdfNativeBackend.loadError`.
 
 When available, the native backend accelerates `prove(...)` and
-`proveAsync(...)` through OpenSSL-backed `dart:ffi` bindings. Verification stays
-on pure Dart. `Wesolowski.hasNativeBackend` and
+`proveAsync(...)` through Rust-backed `dart:ffi` bindings. Verification stays on
+pure Dart. `Wesolowski.hasNativeBackend` and
 `Wesolowski.proveWithNativeBackend(...)` remain available for explicit checks.
