@@ -139,8 +139,16 @@ Map<String, String>? _cargoEnvironment(_CargoConfig? cargoConfig) {
 }
 
 _CargoConfig? _cargoConfig(CodeConfig code, String target) {
-  if (code.targetOS != OS.android) return null;
+  if (code.targetOS == OS.android) {
+    return _androidCargoConfig(code, target);
+  }
+  if (code.targetOS == OS.macOS || code.targetOS == OS.iOS) {
+    return _appleCargoConfig(code, target);
+  }
+  return null;
+}
 
+_CargoConfig _androidCargoConfig(CodeConfig code, String target) {
   final ndk = _androidNdkRoot();
   if (ndk == null || ndk.isEmpty) {
     throw StateError(
@@ -184,6 +192,55 @@ linker = "$linker"
     linker: linker,
     environment: <String, String>{'CARGO_TARGET_${keyTarget}_LINKER': linker},
   );
+}
+
+_CargoConfig _appleCargoConfig(CodeConfig code, String target) {
+  final sdk = switch (code.targetOS) {
+    OS.macOS => 'macosx',
+    OS.iOS => switch (code.iOS.targetSdk) {
+      IOSSdk.iPhoneOS => 'iphoneos',
+      IOSSdk.iPhoneSimulator => 'iphonesimulator',
+      _ => throw UnsupportedError('Unsupported iOS SDK: ${code.iOS.targetSdk}'),
+    },
+    _ => throw UnsupportedError(
+      'Unsupported Apple target OS: ${code.targetOS}',
+    ),
+  };
+  final linker = _xcrun(sdk, <String>['--find', 'clang']);
+  final sdkRoot = _xcrun(sdk, <String>['--show-sdk-path']);
+  final keyTarget = target.toUpperCase().replaceAll('-', '_');
+  final cargoHome = Directory.systemTemp.createTempSync('vdfrsa-cargo-home-');
+  final cargoConfig = File('${cargoHome.path}/config.toml');
+  cargoConfig.writeAsStringSync('''
+[target.$target]
+linker = "$linker"
+rustflags = ["-C", "link-arg=-isysroot", "-C", "link-arg=$sdkRoot"]
+''');
+
+  return _CargoConfig(
+    cargoHome: cargoHome,
+    linker: linker,
+    environment: <String, String>{
+      'SDKROOT': sdkRoot,
+      'CARGO_TARGET_${keyTarget}_LINKER': linker,
+    },
+  );
+}
+
+String _xcrun(String sdk, List<String> args) {
+  final result = Process.runSync('xcrun', <String>['--sdk', sdk, ...args]);
+  if (result.exitCode != 0) {
+    throw StateError(
+      'xcrun failed for SDK $sdk with args ${args.join(' ')}\n'
+      'stdout:\n${result.stdout}\n'
+      'stderr:\n${result.stderr}',
+    );
+  }
+  final value = result.stdout.toString().trim();
+  if (value.isEmpty) {
+    throw StateError('xcrun returned an empty result for SDK $sdk');
+  }
+  return value;
 }
 
 String? _androidNdkRoot() {

@@ -1,6 +1,6 @@
 name: vdfrsa
 description: Dart implementation of Wesolowski RSA-group VDF
-version: 0.4.3
+version: 0.4.4
 publish_to: none
 
 environment:
