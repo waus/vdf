@@ -18,7 +18,16 @@ void main(List<String> args) async {
     final targetDir = Directory.fromUri(input.outputDirectory.resolve('cargo/'))
       ..createSync(recursive: true);
 
-    final environment = _cargoEnvironment(code, target);
+    final cargoConfig = _cargoConfig(code, target);
+    final environment = _cargoEnvironment(cargoConfig);
+    if (cargoConfig != null) {
+      stderr.writeln(
+        'vdfrsa: building Rust native backend for $target '
+        'with linker ${cargoConfig.linker}',
+      );
+    } else {
+      stderr.writeln('vdfrsa: building Rust native backend for $target');
+    }
     final result = await Process.run(
       'cargo',
       <String>[
@@ -119,16 +128,26 @@ String _cargoLibraryPath(String targetDir, String target, OS os) {
   return '$targetDir/$target/release/$fileName';
 }
 
-Map<String, String>? _cargoEnvironment(CodeConfig code, String target) {
-  if (code.targetOS != OS.android) {
-    return null;
-  }
+Map<String, String>? _cargoEnvironment(_CargoConfig? cargoConfig) {
+  if (cargoConfig == null) return null;
+
+  final environment = <String, String>{
+    'CARGO_HOME': cargoConfig.cargoHome.path,
+  };
+  environment.addAll(cargoConfig.environment);
+  return environment;
+}
+
+_CargoConfig? _cargoConfig(CodeConfig code, String target) {
+  if (code.targetOS != OS.android) return null;
 
   final ndk =
       Platform.environment['ANDROID_NDK_HOME'] ??
       Platform.environment['ANDROID_NDK_ROOT'];
   if (ndk == null || ndk.isEmpty) {
-    return null;
+    throw StateError(
+      'ANDROID_NDK_HOME or ANDROID_NDK_ROOT must be set for Android Rust builds',
+    );
   }
 
   final host = switch (OS.current) {
@@ -148,9 +167,35 @@ Map<String, String>? _cargoEnvironment(CodeConfig code, String target) {
     _ => null,
   };
   if (linker == null) {
-    return null;
+    throw UnsupportedError('Unsupported Android Rust target: $target');
+  }
+  if (!File(linker).existsSync()) {
+    throw StateError('Android Rust linker was not found: $linker');
   }
 
   final keyTarget = target.toUpperCase().replaceAll('-', '_');
-  return <String, String>{'CARGO_TARGET_${keyTarget}_LINKER': linker};
+  final cargoHome = Directory.systemTemp.createTempSync('vdfrsa-cargo-home-');
+  final cargoConfig = File('${cargoHome.path}/config.toml');
+  cargoConfig.writeAsStringSync('''
+[target.$target]
+linker = "$linker"
+''');
+
+  return _CargoConfig(
+    cargoHome: cargoHome,
+    linker: linker,
+    environment: <String, String>{'CARGO_TARGET_${keyTarget}_LINKER': linker},
+  );
+}
+
+final class _CargoConfig {
+  const _CargoConfig({
+    required this.cargoHome,
+    required this.linker,
+    required this.environment,
+  });
+
+  final Directory cargoHome;
+  final String linker;
+  final Map<String, String> environment;
 }
