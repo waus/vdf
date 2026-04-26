@@ -141,12 +141,10 @@ Map<String, String>? _cargoEnvironment(_CargoConfig? cargoConfig) {
 _CargoConfig? _cargoConfig(CodeConfig code, String target) {
   if (code.targetOS != OS.android) return null;
 
-  final ndk =
-      Platform.environment['ANDROID_NDK_HOME'] ??
-      Platform.environment['ANDROID_NDK_ROOT'];
+  final ndk = _androidNdkRoot();
   if (ndk == null || ndk.isEmpty) {
     throw StateError(
-      'ANDROID_NDK_HOME or ANDROID_NDK_ROOT must be set for Android Rust builds',
+      'Android NDK was not found. Set ANDROID_NDK_HOME or ANDROID_NDK_ROOT.',
     );
   }
 
@@ -186,6 +184,55 @@ linker = "$linker"
     linker: linker,
     environment: <String, String>{'CARGO_TARGET_${keyTarget}_LINKER': linker},
   );
+}
+
+String? _androidNdkRoot() {
+  final explicit =
+      Platform.environment['ANDROID_NDK_HOME'] ??
+      Platform.environment['ANDROID_NDK_ROOT'];
+  if (explicit != null &&
+      explicit.isNotEmpty &&
+      Directory(explicit).existsSync()) {
+    return explicit;
+  }
+
+  final sdk =
+      Platform.environment['ANDROID_HOME'] ??
+      Platform.environment['ANDROID_SDK_ROOT'];
+  if (sdk == null || sdk.isEmpty) {
+    return null;
+  }
+
+  final ndkDir = Directory('$sdk/ndk');
+  if (!ndkDir.existsSync()) {
+    return null;
+  }
+  final versions =
+      ndkDir.listSync().whereType<Directory>().map((dir) => dir.path).toList()
+        ..sort(_compareVersionPaths);
+  return versions.isEmpty ? null : versions.last;
+}
+
+int _compareVersionPaths(String a, String b) {
+  return _compareVersions(_lastPathSegment(a), _lastPathSegment(b));
+}
+
+int _compareVersions(String a, String b) {
+  final aParts = a.split('.').map((part) => int.tryParse(part) ?? 0).toList();
+  final bParts = b.split('.').map((part) => int.tryParse(part) ?? 0).toList();
+  final length = aParts.length > bParts.length ? aParts.length : bParts.length;
+  for (var i = 0; i < length; i++) {
+    final aPart = i < aParts.length ? aParts[i] : 0;
+    final bPart = i < bParts.length ? bParts[i] : 0;
+    if (aPart != bPart) return aPart.compareTo(bPart);
+  }
+  return a.compareTo(b);
+}
+
+String _lastPathSegment(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final slash = normalized.lastIndexOf('/');
+  return slash == -1 ? normalized : normalized.substring(slash + 1);
 }
 
 final class _CargoConfig {
